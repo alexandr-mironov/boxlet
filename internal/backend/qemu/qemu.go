@@ -14,13 +14,11 @@ package qemu
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -128,7 +126,9 @@ func (b *Backend) Start(ctx context.Context) error {
 		return err
 	}
 
-	apkovl, err := guest.BuildApkovl(b.cfg.AlpineMirror, b.cfg.AlpineRelease)
+	// qemu-бэкенд: без virtiofs-шар хоста (нужен virtiofsd — в roadmap)
+	// и без Rosetta (это привилегия darwin-vz).
+	apkovl, err := guest.BuildApkovl(b.cfg.AlpineMirror, b.cfg.AlpineRelease, nil, false)
 	if err != nil {
 		b.setState("error", err.Error())
 		return err
@@ -259,53 +259,6 @@ func (b *Backend) monitorPath() string {
 	return filepath.Join(b.layout.Root, "run", "qemu-monitor.sock")
 }
 
-// syncGuest сбрасывает гостевой page cache на диск через служебный
-// контейнер boxlet-agent (создаётся bootstrap-скриптом из статического
-// busybox). sync() в контейнере действует на всё ядро гостевой ОС.
-// Best effort: при недоступности dockerd возвращает ошибку,
-// вызывающий останавливает VM как есть.
-func (b *Backend) syncGuest() error {
-	client := &http.Client{
-		Timeout: 20 * time.Second,
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				addr := fmt.Sprintf("127.0.0.1:%d", b.cfg.DockerPort)
-				return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "tcp", addr)
-			},
-		},
-	}
-
-	body := strings.NewReader(`{"Image":"boxlet-agent:latest","Cmd":["/busybox","sync"],"HostConfig":{"AutoRemove":true}}`)
-	resp, err := client.Post("http://boxlet/containers/create", "application/json", body)
-	if err != nil {
-		return err
-	}
-	data, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("create: %s %s", resp.Status, strings.TrimSpace(string(data)))
-	}
-	var created struct {
-		ID string `json:"Id"`
-	}
-	if err := json.Unmarshal(data, &created); err != nil || created.ID == "" {
-		return fmt.Errorf("create: неожиданный ответ: %s", data)
-	}
-
-	for _, op := range []string{"start", "wait"} {
-		resp, err := client.Post("http://boxlet/containers/"+created.ID+"/"+op, "application/json", nil)
-		if err != nil {
-			return fmt.Errorf("%s: %w", op, err)
-		}
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode >= 400 && op != "wait" {
-			return fmt.Errorf("%s: %s", op, resp.Status)
-		}
-	}
-	return nil
-}
-
 // forwardedPorts разбирает ForwardedPorts из конфига в hostfwd-фрагменты.
 // Привилегированные порты (<1024) пропускаются без root с предупреждением.
 func (b *Backend) forwardedPorts() []string {
@@ -369,7 +322,7 @@ func (b *Backend) Stop(ctx context.Context) error {
 	// sync из контейнера действует на всё ядро гостевой ОС.
 	// Без этого qemu SIGTERM теряет данные из page cache гостя.
 	b.setState("stopping", "сбрасываю данные на диск (sync)")
-	if err := b.syncGuest(); err != nil {
+	if err := backend.SyncGuest(fmt.Sprintf("127.0.0.1:%d", b.cfg.DockerPort)); err != nil {
 		log.Printf("boxlet/qemu: sync гостевой ОС не удался, останавливаю как есть: %v", err)
 	}
 	proc.Signal(syscall.SIGTERM)

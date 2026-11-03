@@ -49,6 +49,11 @@ type Config struct {
 	// DockerPort — порт, на котором dockerd в гостевой ОС слушает TCP,
 	// и на который он пробрасывается на 127.0.0.1 хоста.
 	DockerPort int `json:"docker_port"`
+
+	// MAC — адрес сетевого интерфейса VM (darwin-vz): по нему демон
+	// находит IP гостя в /var/db/dhcpd_leases. Генерируется при первом
+	// запуске и сохраняется.
+	MAC string `json:"mac,omitempty"`
 }
 
 // Default возвращает конфигурацию по умолчанию для текущей платформы.

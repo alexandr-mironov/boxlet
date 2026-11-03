@@ -22,10 +22,14 @@
 
 ## M2 — macOS native
 
-- [ ] helper `boxlet-vm` на Virtualization.framework (Swift)
+- [x] helper `boxlet-vm` на Virtualization.framework (Swift, ad-hoc подпись
+      с entitlement; распаковка ядра из zboot-обёртки Alpine)
+- [x] NAT через vmnet: IP гостя из /var/db/dhcpd_leases, dockerd доступен
+      хосту напрямую (hostfwd не нужен)
+- [x] Rosetta для linux/amd64 (`--platform linux/amd64` работает)
+- [x] virtiofs-шаринг каталогов хоста (bind-mount в контейнеры,
+      монтируются по тем же путям, что на хосте)
 - [ ] vsock-канал вместо TCP для прокси сокета
-- [ ] Rosetta для linux/amd64
-- [ ] virtiofs-шаринг каталогов хоста (bind-mount в контейнеры)
 - [ ] прозрачный проброс портов, включая <1024 (privileged helper)
 
 ## M3 — Windows

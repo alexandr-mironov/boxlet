@@ -31,14 +31,22 @@ Boxlet предоставляет стандартный Docker Engine API и с
 
 ## 5. Архитектуры
 
-- [ ] образы linux/amd64 на Apple Silicon: в M2 через Rosetta в гостевой ОС;
-      на qemu-бэкенде возможен запуск amd64-образов через эмуляцию qemu
-      (медленно, не настроено по умолчанию)
+- [x] образы linux/amd64 на Apple Silicon: на бэкенде darwin-vz через
+      Rosetta в гостевой ОС (проверено: `--platform linux/amd64`);
+      на qemu-бэкенде возможна эмуляция qemu (медленно, не настроено)
 
 ## 6. Доступ к файлам
 
-- [ ] bind-mount каталогов хоста (`docker run -v $PWD:/src ...`) —
-      в M2 через virtiofs для macOS; на qemu-бэкенде пока недоступно
+- [x] bind-mount каталогов хоста (`docker run -v $PWD:/src ...`) —
+      на бэкенде darwin-vz через virtiofs (каталоги из `mounts` в конфиге
+      видны в гостевой ОС по тем же путям); на qemu-бэкенде недоступно
+
+## Известные ограничения darwin-vz (M2)
+
+- проброс портов контейнеров на localhost не реализован: порты доступны
+  напрямую по IP гостя (`boxlet status` показывает его), проброс на
+  localhost, включая <1024, — в планах (privileged helper)
+- нет shell в VM из CLI (обходной путь: privileged-контейнер + nsenter)
 
 ## Известные ограничения qemu-бэкенда (M1)
 

@@ -4,8 +4,13 @@ package backend
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
+	"strings"
+	"time"
 )
 
 // Status — состояние бэкенда.
@@ -69,4 +74,51 @@ func Available() []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+// SyncGuest сбрасывает гостевой page cache на диск через служебный
+// контейнер boxlet-agent (создаётся bootstrap-скриптом гостевой ОС из
+// статического busybox). sync() в контейнере действует на всё ядро
+// гостевой ОС. addr — адрес dockerd внутри бэкенда (host:port).
+// Best effort: при недоступности dockerd возвращает ошибку,
+// вызывающий останавливает VM как есть.
+func SyncGuest(addr string) error {
+	client := &http.Client{
+		Timeout: 20 * time.Second,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "tcp", addr)
+			},
+		},
+	}
+
+	body := strings.NewReader(`{"Image":"boxlet-agent:latest","Cmd":["/busybox","sync"],"HostConfig":{"AutoRemove":true}}`)
+	resp, err := client.Post("http://boxlet/containers/create", "application/json", body)
+	if err != nil {
+		return err
+	}
+	data, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("create: %s %s", resp.Status, strings.TrimSpace(string(data)))
+	}
+	var created struct {
+		ID string `json:"Id"`
+	}
+	if err := json.Unmarshal(data, &created); err != nil || created.ID == "" {
+		return fmt.Errorf("create: неожиданный ответ: %s", data)
+	}
+
+	for _, op := range []string{"start", "wait"} {
+		resp, err := client.Post("http://boxlet/containers/"+created.ID+"/"+op, "application/json", nil)
+		if err != nil {
+			return fmt.Errorf("%s: %w", op, err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode >= 400 && op != "wait" {
+			return fmt.Errorf("%s: %s", op, resp.Status)
+		}
+	}
+	return nil
 }

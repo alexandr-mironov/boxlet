@@ -32,10 +32,14 @@ Docker API) работают без изменений, а переход с Doc
 
 | Платформа | Драйвер | Статус |
 |---|---|---|
-| macOS (arm64/amd64) | `darwin-vz` — Virtualization.framework через helper | каркас |
+| macOS (Apple Silicon) | `darwin-vz` — Virtualization.framework через helper | работает: Rosetta (linux/amd64), virtiofs bind-mount |
 | macOS / Linux | `qemu` — diskless Alpine VM с dockerd | работает |
 | Windows | `wsl2` — managed WSL2-дистрибутив | каркас |
 | Linux | `linux` — нативный dockerd без VM | каркас |
+
+Выбор бэкенда — поле `backend` в `~/.boxlet/config.json`
+(`darwin-vz`, `qemu`). На Apple Silicon рекомендуется `darwin-vz`:
+загрузка за секунды, Rosetta и bind-mount каталогов хоста.
 
 Внутри VM разворачивается минимальный diskless Alpine Linux с `dockerd`,
 т.е. API и поведение полностью совпадают с «настоящим» Docker.
@@ -43,8 +47,9 @@ Docker API) работают без изменений, а переход с Doc
 ## Быстрый старт
 
 ```sh
-# зависимости: qemu (brew install qemu)
-make build
+# зависимости: qemu (brew install qemu) — только для qemu-бэкенда;
+# darwin-vz собирается штатным swiftc из Xcode CLT
+make build   # на macOS также собирает и подписывает bin/boxlet-vm
 
 # инициализация (создаёт ~/.boxlet, скачивает образы Alpine)
 boxlet init
@@ -69,6 +74,8 @@ docker ps
 - `internal/proxy` — проксирование Docker API сокета из VM на хост
 - `internal/config`, `internal/paths` — конфигурация и пути инстанса
 - `internal/webui` — встроенный веб-интерфейс (GUI MVP)
+- `vmhelper/` — Swift-хелпер `boxlet-vm` (Virtualization.framework)
+  и entitlements для ad-hoc подписи
 - `docs/` — архитектура, роадмап, заметки по совместимости
 
 ## Документация

@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 )
 
@@ -13,9 +14,10 @@ import (
 // Запускается сервисом local (OpenRC) из /etc/local.d/boxlet.start:
 // ставит docker из репозиториев Alpine, форматирует и монтирует
 // data-диск под /var/lib/docker, настраивает и запускает dockerd.
+// %s — секция virtiofs-шар и Rosetta (зависит от бэкенда).
 const bootstrapScript = `#!/bin/sh
 # boxlet: автонастройка гостевой ОС (генерируется, не редактировать)
-# Лог в консоль (qemu-serial.log).
+# Лог в консоль (серийный лог VM).
 exec >/dev/console 2>&1
 set -x
 echo "boxlet bootstrap: start"
@@ -40,7 +42,7 @@ fi
 modprobe overlay || true
 # ext4 нужен для data-диска; на чистой системе модуль ещё не загружен.
 modprobe ext4 || true
-
+%s
 # Data-диск под данные dockerd: первый virtio-диск, который не modloop.
 DATA_DEV=""
 for d in /dev/vd?; do
@@ -67,8 +69,7 @@ mountpoint -q /sys || mount -t sysfs sysfs /sys
 mkdir -p /sys/fs/cgroup
 mountpoint -q /sys/fs/cgroup || mount -t cgroup2 none /sys/fs/cgroup || true
 
-# dockerd слушает и unix-сокет, и TCP — на TCP ходит прокси с хоста
-# (доступен только через NAT-проброс qemu на 127.0.0.1).
+# dockerd слушает и unix-сокет, и TCP — на TCP ходит прокси с хоста.
 mkdir -p /etc/docker
 cat >/etc/docker/daemon.json <<'DAEMONEOF'
 {"hosts":["unix:///var/run/docker.sock","tcp://0.0.0.0:2375"],"storage-driver":"overlay2"}
@@ -100,6 +101,22 @@ fi
 echo "boxlet bootstrap: done"
 `
 
+// rosettaScript — включение эмуляции linux/amd64 через Rosetta
+// (только darwin-vz на Apple Silicon; virtiofs-шара "rosetta").
+const rosettaScript = `
+# Rosetta: эмуляция linux/amd64 (Apple Silicon, darwin-vz).
+modprobe binfmt_misc || true
+mountpoint -q /proc/sys/fs/binfmt_misc || mount -t binfmt_misc none /proc/sys/fs/binfmt_misc || true
+mkdir -p /run/rosetta
+if mount -t virtiofs rosetta /run/rosetta 2>/dev/null; then
+    echo ':rosetta:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00:\xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/run/rosetta/rosetta:OCF' \
+        > /proc/sys/fs/binfmt_misc/register
+    echo "boxlet: rosetta для linux/amd64 включена"
+else
+    echo "boxlet: шара rosetta недоступна, эмуляция amd64 отключена"
+fi
+`
+
 const networkInterfaces = `auto lo
 iface lo inet loopback
 
@@ -109,8 +126,26 @@ iface eth0 inet dhcp
 
 // BuildApkovl генерирует apkovl.tar.gz — оверлей /etc для diskless-загрузки
 // Alpine: сеть, репозитории, автозапуск сервиса local с bootstrap-скриптом.
-func BuildApkovl(mirror, release string) ([]byte, error) {
+// mounts — каталоги хоста для virtiofs-шар (darwin-vz); rosetta — включить
+// эмуляцию linux/amd64 через Rosetta.
+func BuildApkovl(mirror, release string, mounts []string, rosetta bool) ([]byte, error) {
 	repositories := fmt.Sprintf("%s/%s/main\n%s/%s/community\n", mirror, release, mirror, release)
+
+	// Секция шар хоста и Rosetta для bootstrap-скрипта.
+	var extra strings.Builder
+	if len(mounts) > 0 {
+		extra.WriteString("\n# virtiofs-шары хоста (darwin-vz): тот же абсолютный путь,\n")
+		extra.WriteString("# что на хосте, чтобы работал docker run -v <host-path>.\n")
+		extra.WriteString("modprobe virtiofs || true\n")
+		for i, m := range mounts {
+			fmt.Fprintf(&extra, "mkdir -p %q\n", m)
+			fmt.Fprintf(&extra, "mount -t virtiofs share%d %q || echo \"boxlet: шара share%d (%s) недоступна\"\n", i, m, i, m)
+		}
+	}
+	if rosetta {
+		extra.WriteString(rosettaScript)
+	}
+	script := fmt.Sprintf(bootstrapScript, extra.String())
 
 	files := []struct {
 		name     string
@@ -129,7 +164,7 @@ func BuildApkovl(mirror, release string) ([]byte, error) {
 		{name: "etc/runlevels/boot/", mode: 0o755},
 		{name: "etc/runlevels/boot/networking", mode: 0o777, linkname: "/etc/init.d/networking"},
 		{name: "etc/local.d/", mode: 0o755},
-		{name: "etc/local.d/boxlet.start", body: bootstrapScript, mode: 0o755},
+		{name: "etc/local.d/boxlet.start", body: script, mode: 0o755},
 	}
 
 	var buf bytes.Buffer

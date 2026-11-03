@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
+	"regexp"
 )
 
 // NetbootServer — временный HTTP-сервер, отдающий гостевой ОС
@@ -42,7 +44,33 @@ func (n *NetbootServer) Port() int { return n.port }
 
 // ApkovlURL — URL для kernel cmdline (10.0.2.2 — хост в slirp).
 func (n *NetbootServer) ApkovlURL() string {
-	return fmt.Sprintf("http://10.0.2.2:%d/boxlet.apkovl.tar.gz", n.port)
+	return n.ApkovlURLFor("10.0.2.2")
+}
+
+// ApkovlURLFor — URL для kernel cmdline через указанный адрес хоста.
+// Используется бэкендом darwin-vz: гость достаёт оверлей через шлюз vmnet.
+func (n *NetbootServer) ApkovlURLFor(host string) string {
+	return fmt.Sprintf("http://%s:%d/boxlet.apkovl.tar.gz", host, n.port)
+}
+
+// vmnetPlist — конфигурация сети Virtualization.framework (NAT).
+const vmnetPlist = "/Library/Preferences/SystemConfiguration/com.apple.vmnet.plist"
+
+// sharedNetRe извлекает адрес шлюза из plist (ключ Shared_Net_Address).
+var sharedNetRe = regexp.MustCompile(`(?s)Shared_Net_Address</key>\s*<string>([0-9.]+)</string>`)
+
+// GatewayIP возвращает адрес шлюза vmnet (обычно 192.168.64.1),
+// читая com.apple.vmnet.plist; при любой ошибке — разумный дефолт.
+func GatewayIP() string {
+	const fallback = "192.168.64.1"
+	data, err := os.ReadFile(vmnetPlist)
+	if err != nil {
+		return fallback
+	}
+	if m := sharedNetRe.FindSubmatch(data); m != nil {
+		return string(m[1])
+	}
+	return fallback
 }
 
 // Close останавливает сервер.
