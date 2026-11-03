@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Boxlet</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    font: 14px/1.5 -apple-system, "SF Pro Text", system-ui, sans-serif;
+    background: #0d1117; color: #e6edf3; padding: 24px; max-width: 900px; margin: 0 auto;
+  }
+  h1 { font-size: 22px; display: flex; align-items: center; gap: 10px; }
+  .badge { font-size: 12px; padding: 3px 10px; border-radius: 999px; }
+  .running { background: #1a7f37; }
+  .stopped { background: #6e7681; }
+  .error   { background: #cf222e; }
+  section { margin-top: 24px; background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 16px; }
+  h2 { font-size: 14px; color: #8b949e; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 12px; }
+  button {
+    font: inherit; padding: 6px 16px; border-radius: 8px; border: 1px solid #30363d;
+    background: #21262d; color: inherit; cursor: pointer;
+  }
+  button:hover { background: #2d333b; }
+  table { width: 100%; border-collapse: collapse; }
+  td, th { text-align: left; padding: 6px 8px; border-bottom: 1px solid #21262d; font-size: 13px; }
+  .muted { color: #8b949e; }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
+</style>
+</head>
+<body>
+  <h1>Boxlet <span id="badge" class="badge stopped">…</span></h1>
+
+  <section>
+    <h2>Движок</h2>
+    <p id="engine" class="muted">загрузка…</p>
+    <p style="margin-top:10px">
+      <button onclick="action('start')">Старт</button>
+      <button onclick="action('stop')">Стоп</button>
+      <button onclick="location.reload()">Обновить</button>
+    </p>
+    <p class="muted mono" style="margin-top:10px">Docker API: <span id="sock"></span></p>
+  </section>
+
+  <section>
+    <h2>Контейнеры</h2>
+    <div id="containers" class="muted">—</div>
+  </section>
+
+<script>
+document.getElementById('sock').textContent = '~/.boxlet/run/docker.sock';
+
+async function refresh() {
+  try {
+    const st = await (await fetch('/api/status')).json();
+    const badge = document.getElementById('badge');
+    badge.textContent = st.state;
+    badge.className = 'badge ' + (st.running ? 'running' : (st.state === 'error' ? 'error' : 'stopped'));
+    document.getElementById('engine').textContent =
+      'бэкенд: ' + st.backend + (st.detail ? ' — ' + st.detail : '');
+  } catch (e) {
+    document.getElementById('engine').textContent = 'демон недоступен: ' + e;
+  }
+  try {
+    const list = await (await fetch('/api/containers')).json();
+    const box = document.getElementById('containers');
+    if (!list || !list.length) { box.textContent = 'контейнеров нет'; return; }
+    box.innerHTML = '<table><tr><th>Имя</th><th>Образ</th><th>Статус</th><th>Порты</th></tr>' +
+      list.map(c => '<tr><td class="mono">' + (c.Names?.[0] || '').replace(/^\//, '') +
+        '</td><td class="mono">' + c.Image + '</td><td>' + c.Status +
+        '</td><td class="mono">' + (c.Ports || []).map(p => (p.PublicPort ? p.PublicPort + '→' : '') + p.PrivatePort).join(', ') +
+        '</td></tr>').join('') + '</table>';
+  } catch (e) {
+    document.getElementById('containers').textContent = 'docker API недоступен (движок остановлен?)';
+  }
+}
+
+async function action(name) {
+  await fetch('/api/' + name, { method: 'POST' });
+  setTimeout(refresh, 500);
+}
+
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>
