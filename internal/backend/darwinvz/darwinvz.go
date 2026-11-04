@@ -370,6 +370,7 @@ func (b *Backend) Stop(ctx context.Context) error {
 			b.mu.Lock()
 			b.adopted = false
 			b.mu.Unlock()
+			b.waitReaped(5 * time.Second)
 			b.setState("stopped", "остановлен")
 			return nil
 		}
@@ -383,8 +384,26 @@ func (b *Backend) Stop(ctx context.Context) error {
 	b.mu.Lock()
 	b.adopted = false
 	b.mu.Unlock()
+	b.waitReaped(5 * time.Second)
 	b.setState("stopped", "остановлен принудительно (SIGKILL)")
 	return nil
+}
+
+// waitReaped дожидается, пока goroutine с cmd.Wait() подчистит состояние
+// (b.cmd = nil). Без этого Start сразу после Stop может увидеть ещё не
+// reaped процесс (зомби успешно отвечает на signal 0) и упасть
+// с «уже запущен» — именно так ломался /api/restart.
+func (b *Backend) waitReaped(timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		b.mu.Lock()
+		done := b.cmd == nil
+		b.mu.Unlock()
+		if done {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func (b *Backend) Status(ctx context.Context) (backend.Status, error) {

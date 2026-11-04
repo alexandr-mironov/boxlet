@@ -53,6 +53,9 @@
 - [x] DNS-зона `*.boxlet.local` → адрес гостевой ОС: сервер в boxletd
       (127.0.0.1:15353), активация через /etc/resolver/boxlet
       (`boxlet dns install`)
+- [x] веб-интерфейс: live-метрики гостя (load, RAM), кнопка «Рестарт»
+      (`POST /api/restart`), просмотр логов (`GET /api/logs`) со слежением;
+      фикс гонки Stop→Start (reap зомби-процесса boxlet-vm)
 - [ ] vsock-канал вместо TCP для прокси сокета и агента
 - [ ] pty в boxlet shell (сейчас строчный режим без pty)
 

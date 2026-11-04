@@ -23,10 +23,24 @@
     background: #21262d; color: inherit; cursor: pointer;
   }
   button:hover { background: #2d333b; }
+  button.danger:hover { border-color: #cf222e; }
+  select {
+    font: inherit; padding: 5px 10px; border-radius: 8px; border: 1px solid #30363d;
+    background: #21262d; color: inherit;
+  }
   table { width: 100%; border-collapse: collapse; }
   td, th { text-align: left; padding: 6px 8px; border-bottom: 1px solid #21262d; font-size: 13px; }
   .muted { color: #8b949e; }
   .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
+  pre.logs {
+    background: #0d1117; border: 1px solid #21262d; border-radius: 8px;
+    padding: 10px; max-height: 320px; overflow: auto; white-space: pre-wrap;
+    word-break: break-all; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11px; line-height: 1.45;
+  }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .grow { flex: 1; }
+  #metrics { margin-top: 8px; }
 </style>
 </head>
 <body>
@@ -35,10 +49,13 @@
   <section>
     <h2>Движок</h2>
     <p id="engine" class="muted">загрузка…</p>
-    <p style="margin-top:10px">
+    <p id="metrics" class="muted mono"></p>
+    <p class="row" style="margin-top:10px">
       <button onclick="action('start')">Старт</button>
       <button onclick="action('stop')">Стоп</button>
-      <button onclick="location.reload()">Обновить</button>
+      <button class="danger" onclick="restart()">Рестарт</button>
+      <span class="grow"></span>
+      <button onclick="refresh()">Обновить</button>
     </p>
     <p class="muted mono" style="margin-top:10px">Docker API: <span id="sock"></span></p>
   </section>
@@ -48,8 +65,29 @@
     <div id="containers" class="muted">—</div>
   </section>
 
+  <section>
+    <h2>Логи</h2>
+    <p class="row" style="margin-bottom:10px">
+      <select id="logname" onchange="refreshLogs()">
+        <option value="daemon">демон (boxletd)</option>
+        <option value="vm">VM (serial)</option>
+        <option value="helper">хелпер VM</option>
+        <option value="priv">boxlet-priv</option>
+        <option value="dockerd">dockerd (гость)</option>
+        <option value="agent">агент (гость)</option>
+      </select>
+      <label class="muted" style="font-size:13px">
+        <input type="checkbox" id="logfollow" checked> следить
+      </label>
+      <span class="grow"></span>
+      <button onclick="refreshLogs()">Обновить</button>
+    </p>
+    <pre id="logs" class="logs muted">—</pre>
+  </section>
+
 <script>
 document.getElementById('sock').textContent = '~/.boxlet/run/docker.sock';
+let restarting = false;
 
 async function refresh() {
   try {
@@ -59,6 +97,13 @@ async function refresh() {
     badge.className = 'badge ' + (st.running ? 'running' : (st.state === 'error' ? 'error' : 'stopped'));
     document.getElementById('engine').textContent =
       'бэкенд: ' + st.backend + (st.detail ? ' — ' + st.detail : '');
+    if (st.running) {
+      if (restarting) { restarting = false; }
+      refreshMetrics();
+    } else {
+      document.getElementById('metrics').textContent =
+        restarting ? 'рестарт: движок остановлен, ждём запуска…' : '';
+    }
   } catch (e) {
     document.getElementById('engine').textContent = 'демон недоступен: ' + e;
   }
@@ -67,12 +112,37 @@ async function refresh() {
     const box = document.getElementById('containers');
     if (!list || !list.length) { box.textContent = 'контейнеров нет'; return; }
     box.innerHTML = '<table><tr><th>Имя</th><th>Образ</th><th>Статус</th><th>Порты</th></tr>' +
-      list.map(c => '<tr><td class="mono">' + (c.Names?.[0] || '').replace(/^\//, '') +
-        '</td><td class="mono">' + c.Image + '</td><td>' + c.Status +
+      list.map(c => '<tr><td class="mono">' + esc((c.Names?.[0] || '').replace(/^\//, '')) +
+        '</td><td class="mono">' + esc(c.Image) + '</td><td>' + esc(c.Status) +
         '</td><td class="mono">' + (c.Ports || []).map(p => (p.PublicPort ? p.PublicPort + '→' : '') + p.PrivatePort).join(', ') +
         '</td></tr>').join('') + '</table>';
   } catch (e) {
     document.getElementById('containers').textContent = 'docker API недоступен (движок остановлен?)';
+  }
+}
+
+async function refreshMetrics() {
+  try {
+    const resp = await fetch('/api/metrics');
+    if (!resp.ok) { document.getElementById('metrics').textContent = ''; return; }
+    const m = await resp.json();
+    let s = 'load ' + (m.load || '—');
+    if (m.mem_total_mib > 0) s += ', RAM ' + m.mem_used_mib + '/' + m.mem_total_mib + ' MiB занято';
+    document.getElementById('metrics').textContent = s;
+  } catch (e) { /* метрики опциональны */ }
+}
+
+async function refreshLogs() {
+  const name = document.getElementById('logname').value;
+  const box = document.getElementById('logs');
+  try {
+    const resp = await fetch('/api/logs?name=' + encodeURIComponent(name) + '&tail=300');
+    const text = await resp.text();
+    box.classList.remove('muted');
+    box.textContent = resp.ok ? (text.trimEnd() || '(пусто)') : text;
+    box.scrollTop = box.scrollHeight;
+  } catch (e) {
+    box.textContent = 'логи недоступны: ' + e;
   }
 }
 
@@ -81,8 +151,21 @@ async function action(name) {
   setTimeout(refresh, 500);
 }
 
+async function restart() {
+  if (!confirm('Перезапустить движок? Контейнеры будут остановлены.')) return;
+  restarting = true;
+  await fetch('/api/restart', { method: 'POST' });
+  setTimeout(refresh, 1000);
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+
 refresh();
+refreshLogs();
 setInterval(refresh, 3000);
+setInterval(() => { if (document.getElementById('logfollow').checked) refreshLogs(); }, 3000);
 </script>
 </body>
 </html>

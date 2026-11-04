@@ -35,6 +35,7 @@ import (
 
 type daemon struct {
 	cfg    *config.Config
+	root   string
 	layout paths.Layout
 	be     backend.Backend
 	px     *proxy.Proxy
@@ -78,7 +79,7 @@ func run() error {
 		return err
 	}
 
-	d := &daemon{cfg: cfg, layout: layout, be: be, px: proxy.New(be, layout.DockerSock)}
+	d := &daemon{cfg: cfg, root: root, layout: layout, be: be, px: proxy.New(be, layout.DockerSock)}
 
 	// Control API + веб-интерфейс — поднимаем СРАЗУ, до запуска бэкенда:
 	// загрузка VM занимает минуты, и CLI должен видеть прогресс.
@@ -86,6 +87,9 @@ func run() error {
 	mux.HandleFunc("/api/status", d.handleStatus)
 	mux.HandleFunc("/api/start", d.handleStart)
 	mux.HandleFunc("/api/stop", d.handleStop)
+	mux.HandleFunc("/api/restart", d.handleRestart)
+	mux.HandleFunc("/api/metrics", d.handleMetrics)
+	mux.HandleFunc("/api/logs", d.handleLogs)
 	mux.HandleFunc("/api/containers", d.handleContainers)
 	mux.Handle("/", webui.Handler())
 
