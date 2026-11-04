@@ -6,7 +6,8 @@
 //
 // Отличия от qemu-бэкенда:
 //   - сеть: NAT через vmnet; IP гостя доступен хосту напрямую,
-//     docker API слушается на guestIP:2375 (без hostfwd);
+//     docker API (только TLS с клиентским сертификатом boxlet) —
+//     на guestIP:2375 без hostfwd;
 //   - virtiofs-шары каталогов хоста (bind-mount в контейнеры);
 //   - Rosetta для запуска linux/amd64 образов на Apple Silicon.
 package darwinvz
@@ -14,10 +15,12 @@ package darwinvz
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,14 +31,19 @@ import (
 	"time"
 
 	"github.com/alexandr-mironov/boxlet/internal/backend"
+	"github.com/alexandr-mironov/boxlet/internal/certs"
 	"github.com/alexandr-mironov/boxlet/internal/config"
 	"github.com/alexandr-mironov/boxlet/internal/guest"
 	"github.com/alexandr-mironov/boxlet/internal/paths"
 	"github.com/alexandr-mironov/boxlet/internal/vmnet"
 )
 
-// bootTimeout — первая загрузка ставит пакеты из сети.
-const bootTimeout = 10 * time.Minute
+const (
+	// bootTimeout — первая загрузка ставит пакеты из сети.
+	bootTimeout = 10 * time.Minute
+	// powerdownTimeout — сколько ждём штатного выключения гостевой ОС.
+	powerdownTimeout = 30 * time.Second
+)
 
 type Backend struct {
 	cfg    *config.Config
@@ -46,6 +54,8 @@ type Backend struct {
 	cmd     *exec.Cmd
 	adopted bool // VM запущена прошлым экземпляром демона, мы её подхватили
 	guestIP string
+	// tlsConfig — клиентская TLS-конфигурация для dockerd в госте.
+	tlsConfig *tls.Config
 }
 
 func New() backend.Backend {
@@ -82,8 +92,8 @@ func helperPath() (string, error) {
 	return path, nil
 }
 
-// Prepare скачивает netboot-файлы Alpine, проверяет helper
-// и создаёт raw-диск под данные dockerd.
+// Prepare скачивает netboot-файлы Alpine, проверяет helper,
+// создаёт raw-диск под данные dockerd и TLS-сертификаты.
 func (b *Backend) Prepare(ctx context.Context) error {
 	if _, err := helperPath(); err != nil {
 		return err
@@ -91,10 +101,30 @@ func (b *Backend) Prepare(ctx context.Context) error {
 	if _, err := guest.Ensure(ctx, b.layout.ImagesDir, b.cfg.AlpineRelease, b.cfg.AlpineMirror, os.Stdout); err != nil {
 		return err
 	}
+	if _, err := certs.Ensure(b.layout.CertsDir); err != nil {
+		return err
+	}
 	if err := b.ensureDisk(); err != nil {
 		return err
 	}
 	return b.ensureMAC()
+}
+
+// loadTLS загружает (или выпускает) TLS-комплект и запоминает
+// клиентскую конфигурацию для подключений к dockerd.
+func (b *Backend) loadTLS() (*certs.Bundle, error) {
+	bundle, err := certs.Ensure(b.layout.CertsDir)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := bundle.ClientConfig()
+	if err != nil {
+		return nil, err
+	}
+	b.mu.Lock()
+	b.tlsConfig = cfg
+	b.mu.Unlock()
+	return bundle, nil
 }
 
 // ensureDisk создаёт разреженный raw-диск (VZ не читает qcow2).
@@ -150,11 +180,15 @@ func (b *Backend) Start(ctx context.Context) error {
 		b.mu.Lock()
 		b.guestIP = ip
 		b.mu.Unlock()
-		if err := waitDocker(ctx, net.JoinHostPort(ip, strconv.Itoa(b.cfg.DockerPort)), bootTimeout); err != nil {
+		if _, err := b.loadTLS(); err != nil {
+			b.setState("error", err.Error())
+			return err
+		}
+		if err := b.waitDocker(ctx, bootTimeout); err != nil {
 			b.setState("error", err.Error())
 			return fmt.Errorf("dockerd не поднялся: %w (см. %s)", err, b.serialLog())
 		}
-		b.setState("running", fmt.Sprintf("dockerd готов (%s:%d, VM подхвачена)", ip, b.cfg.DockerPort))
+		b.setState("running", fmt.Sprintf("dockerd готов (%s:%d, TLS, VM подхвачена)", ip, guest.DockerPort))
 		go b.watchAdopted()
 		return nil
 	}
@@ -176,7 +210,12 @@ func (b *Backend) Start(ctx context.Context) error {
 		b.setState("error", err.Error())
 		return err
 	}
-	apkovl, err := guest.BuildApkovl(b.cfg.AlpineMirror, b.cfg.AlpineRelease, b.cfg.Mounts, b.cfg.Rosetta, agent, token)
+	bundle, err := b.loadTLS()
+	if err != nil {
+		b.setState("error", err.Error())
+		return err
+	}
+	apkovl, err := guest.BuildApkovl(b.cfg.AlpineMirror, b.cfg.AlpineRelease, b.cfg.Mounts, b.cfg.Rosetta, agent, token, bundle)
 	if err != nil {
 		b.setState("error", err.Error())
 		return err
@@ -198,7 +237,10 @@ func (b *Backend) Start(ctx context.Context) error {
 		Modloop: filepath.Join(assetsDir, "modloop-virt"),
 	}
 
-	netboot, err := guest.ServeNetboot(apkovl)
+	// Все интерфейсы: мост vmnet появляется только вместе с VM.
+	// Оверлей (в нём TLS-ключ dockerd и токен агента) защищён
+	// случайным путём и закрывается после загрузки.
+	netboot, err := guest.ServeNetboot("", apkovl)
 	if err != nil {
 		b.setState("error", err.Error())
 		return err
@@ -283,13 +325,15 @@ func (b *Backend) Start(ctx context.Context) error {
 	b.mu.Unlock()
 
 	b.setState("starting", "жду dockerd (первая загрузка ставит пакеты, до нескольких минут)")
-	if err := waitDocker(ctx, net.JoinHostPort(ip, strconv.Itoa(b.cfg.DockerPort)), bootTimeout); err != nil {
+	if err := b.waitDocker(ctx, bootTimeout); err != nil {
 		b.Stop(context.Background())
 		b.setState("error", err.Error())
 		return fmt.Errorf("dockerd не поднялся: %w (см. %s)", err, b.serialLog())
 	}
+	// Оверлей больше не нужен — не держим ключи доступными.
+	netboot.Close()
 
-	b.setState("running", fmt.Sprintf("dockerd готов (%s:%d)", ip, b.cfg.DockerPort))
+	b.setState("running", fmt.Sprintf("dockerd готов (%s:%d, TLS)", ip, guest.DockerPort))
 	return nil
 }
 
@@ -310,29 +354,47 @@ func (b *Backend) waitGuestIP(ctx context.Context, timeout time.Duration) (strin
 	return "", fmt.Errorf("lease не найден за %s", timeout)
 }
 
-// waitDocker ждёт ответа dockerd по TCP.
-func waitDocker(ctx context.Context, addr string, timeout time.Duration) error {
+// waitDocker ждёт ответа dockerd на /_ping по TLS.
+func (b *Backend) waitDocker(ctx context.Context, timeout time.Duration) error {
+	client := backend.DockerClient(b.dialDocker, 5*time.Second)
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://boxlet/_ping", nil)
+		if err != nil {
+			return err
 		}
-		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
-		if err == nil {
-			fmt.Fprintf(conn, "GET /_ping HTTP/1.1\r\nHost: boxlet\r\n\r\n")
-			conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-			buf := make([]byte, 256)
-			n, _ := conn.Read(buf)
-			conn.Close()
-			if strings.Contains(string(buf[:n]), "200") {
+		if resp, err := client.Do(req); err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
 				return nil
 			}
 		}
-		time.Sleep(2 * time.Second)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
 	}
 	return fmt.Errorf("таймаут %s", timeout)
+}
+
+// dialDocker открывает TLS-соединение с dockerd по IP гостя в vmnet.
+func (b *Backend) dialDocker(ctx context.Context) (net.Conn, error) {
+	ip, err := b.GuestIP()
+	if err != nil {
+		return nil, err
+	}
+	b.mu.Lock()
+	cfg := b.tlsConfig
+	b.mu.Unlock()
+	if cfg == nil {
+		return nil, errors.New("TLS-сертификаты dockerd ещё не загружены")
+	}
+	d := &tls.Dialer{
+		NetDialer: &net.Dialer{Timeout: 3 * time.Second},
+		Config:    cfg,
+	}
+	return d.DialContext(ctx, "tcp", net.JoinHostPort(ip, strconv.Itoa(guest.DockerPort)))
 }
 
 func (b *Backend) Stop(ctx context.Context) error {
@@ -353,17 +415,38 @@ func (b *Backend) Stop(ctx context.Context) error {
 		return nil
 	}
 	b.setStateLocked("stopping", "сбрасываю данные на диск (sync)")
-	ip := b.guestIP
 	b.mu.Unlock()
 
 	// sync гостевой ФС перед остановкой, чтобы не потерять данные dockerd.
-	if ip != "" {
-		if err := backend.SyncGuest(net.JoinHostPort(ip, strconv.Itoa(b.cfg.DockerPort))); err != nil {
-			log.Printf("boxlet/darwin-vz: sync гостевой ОС не удался: %v", err)
-		}
+	if err := backend.SyncGuest(b.dialDocker); err != nil {
+		log.Printf("boxlet/darwin-vz: sync гостевой ОС не удался: %v", err)
 	}
 
-	proc.Signal(syscall.SIGTERM) // helper штатно остановит VM
+	// Штатное выключение гостя: helper завершится вместе с VM.
+	b.setState("stopping", "выключаю гостевую ОС")
+	if err := backend.PowerOffGuest(b.dialDocker); err != nil {
+		log.Printf("boxlet/darwin-vz: штатное выключение не удалось: %v", err)
+	} else {
+		deadline := time.Now().Add(powerdownTimeout)
+		for time.Now().Before(deadline) {
+			if err := proc.Signal(syscall.Signal(0)); err != nil {
+				b.mu.Lock()
+				b.adopted = false
+				b.mu.Unlock()
+				b.waitReaped(5 * time.Second)
+				b.setState("stopped", "остановлен")
+				return nil
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(300 * time.Millisecond):
+			}
+		}
+		log.Printf("boxlet/darwin-vz: гостевая ОС не выключилась за %s, SIGTERM", powerdownTimeout)
+	}
+
+	proc.Signal(syscall.SIGTERM) // helper остановит VM через requestStop
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		if err := proc.Signal(syscall.Signal(0)); err != nil {
@@ -432,15 +515,11 @@ func (b *Backend) GuestIP() (string, error) {
 	return ip, nil
 }
 
-// GuestSocket подключается к dockerd напрямую по IP гостя,
-// hostfwd не нужен.
+// GuestSocket подключается к dockerd напрямую по IP гостя (TLS),
+// hostfwd не нужен. tls.Dialer возвращает соединение после рукопожатия,
+// поэтому CloseWrite в прокси (close_notify) работает сразу.
 func (b *Backend) GuestSocket(ctx context.Context) (net.Conn, error) {
-	ip, err := b.GuestIP()
-	if err != nil {
-		return nil, err
-	}
-	var d net.Dialer
-	return d.DialContext(ctx, "tcp", net.JoinHostPort(ip, strconv.Itoa(b.cfg.DockerPort)))
+	return b.dialDocker(ctx)
 }
 
 // AgentAddr — адрес гостевого агента (boxlet shell). Реализует backend.Sheller.

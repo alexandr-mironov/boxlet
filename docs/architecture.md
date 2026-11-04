@@ -45,12 +45,21 @@ Diskless Alpine Linux в qemu:
 - `modloop-virt` подключается отдельным read-only virtio-диском —
   из него гостевая ОС получает модули ядра (overlayfs, ext4)
 - настройка через apkovl-оверлей (генерируется при старте, отдаётся
-  в VM по HTTP через slirp-адрес хоста 10.0.2.2): сеть, репозитории,
-  bootstrap-скрипт в /etc/local.d
+  в VM по HTTP через slirp-адрес хоста 10.0.2.2; сервер слушает только
+  127.0.0.1, отдаёт оверлей по случайному пути из kernel cmdline
+  и закрывается после готовности dockerd): сеть, репозитории,
+  TLS-сертификаты dockerd, токен агента, скрипты запуска и остановки
+  в /etc/local.d
 - bootstrap ставит `docker` из apk, монтирует qcow2-диск под
   /var/lib/docker, поднимает dockerd на unix-сокете и TCP 2375
-- qemu user-mode networking: hostfwd пробрасывает 2375 (dockerd)
-  и порты из `forwarded_ports` на localhost
+  только с `tlsverify`
+- qemu user-mode networking: hostfwd пробрасывает TLS-порт dockerd
+  на `127.0.0.1:<docker_port>` и порты из `forwarded_ports` на localhost
+- `Stop` во время загрузки прерывает `Start`; смерть qemu при загрузке
+  обнаруживается сразу, а не по таймауту
+- если демон упал, а VM осталась (pid из `run/qemu.pid`, процесс
+  проверяется по имени), следующий `start` подхватывает её без
+  перезагрузки, если dockerd отвечает, иначе выключает и грузит заново
 - ускорение: hvf на macOS, kvm на Linux
 
 ### darwin-vz (macOS, работает, M2)
@@ -71,14 +80,19 @@ helper-бинарь `boxlet-vm` (Swift, тонкая обёртка над VZ, �
 - сеть: NAT через vmnet; IP гостя находится по MAC в
   `/var/db/dhcpd_leases` (октеты MAC там без ведущих нулей, порядок полей
   в записи не гарантирован); dockerd доступен хосту напрямую по
-  `guestIP:2375`, hostfwd не нужен
+  `guestIP:2375` — по TLS с клиентским сертификатом, как у qemu;
+  hostfwd не нужен
+- netboot-сервер слушает все интерфейсы (мост vmnet появляется только
+  вместе с VM), оверлей защищён случайным путём и закрывается после
+  загрузки
 - Rosetta для linux/amd64 (`VZLinuxRosettaDirectoryShare`, тег rosetta,
   в гостевой ОС регистрируется binfmt_misc)
 - virtiofs-шары каталогов из `mounts`: в гостевой ОС монтируются по тем
   же путям, что на хосте, поэтому bind-mount `-v ~/projects/...` в
   контейнеры работает прозрачно
 - диск данных — разреженный raw-образ (VZ не читает qcow2)
-- штатная остановка: SIGTERM хелперу → `requestStop()` в VZ
+- остановка — общая для обоих бэкендов, см. ниже; SIGTERM хелперу →
+  `requestStop()` в VZ — запасной путь
 - проброс портов: dockerd публикует порты контейнеров на 0.0.0.0 гостя;
   демон (`internal/proxy.PortForwarder`) опрашивает dockerd раз в 2 секунды
   и поднимает слушатели 127.0.0.1:port → guestIP:port для всех
@@ -143,6 +157,21 @@ stdin после attach-запроса) пробрасывается через 
 Полноценный desktop GUI планируется поверх того же API демона
 (см. docs/roadmap.md).
 
+## Доступ к dockerd и остановка VM (оба VM-бэкенда)
+
+- dockerd в госте слушает TCP только с `tlsverify`: CA, серверный
+  и клиентский сертификаты выпускаются в `~/.boxlet/certs` (0700) при
+  первом запуске, в гостевую ОС едут только CA и серверная пара. Без
+  клиентского сертификата к порту dockerd не подключиться ни другому
+  локальному процессу, ни другой VM в vmnet, ни веб-странице через
+  DNS rebinding. Публичный `~/.boxlet/run/docker.sock` — 0600
+- остановка: `sync` и затем USR2 в init гостя через служебный контейнер
+  `boxlet-agent` (`--pid=host`, статический busybox) — штатный poweroff
+  с `openrc shutdown`, `local.d/boxlet.stop` гасит dockerd и отмонтирует
+  data-диск. SIGTERM/SIGKILL процесса VM — только если гость не
+  выключился за 30 с. (`system_powerdown` в qemu не подходит: в Alpine
+  virt-ядре на arm нет gpio-keys, гость кнопку питания не видит)
+
 ## Директории
 
 ```
@@ -151,7 +180,8 @@ stdin после attach-запроса) пробрасывается через 
   run/
     boxletd.pid        # pid демона
     qemu.pid           # pid VM
-    docker.sock        # публичный Docker API сокет
+    docker.sock        # публичный Docker API сокет (0600)
+  certs/               # TLS-комплект для dockerd в VM (0700)
   images/              # netboot-файлы Alpine (kernel, initramfs, modloop)
   data/                # qcow2-диск под данные dockerd
   logs/                # логи демона, qemu и серийной консоли VM

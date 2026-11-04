@@ -5,8 +5,11 @@ import (
 	"bytes"
 	"compress/gzip"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/alexandr-mironov/boxlet/internal/certs"
 )
 
 // bootstrapScript — скрипт первой загрузки гостевой ОС.
@@ -28,7 +31,9 @@ if ! ip -4 addr show dev eth0 | grep -q "inet "; then
 fi
 
 apk update
-apk add docker e2fsprogs
+# busybox-static — для служебного образа boxlet-agent: обычный
+# /bin/busybox слинкован с musl и в пустом образе не запустится.
+apk add docker e2fsprogs busybox-static
 
 # Модули ядра: modloop-virt подключён как отдельный read-only
 # virtio-диск (squashfs). Находим его по типу ФС и монтируем.
@@ -68,10 +73,14 @@ mountpoint -q /sys || mount -t sysfs sysfs /sys
 mkdir -p /sys/fs/cgroup
 mountpoint -q /sys/fs/cgroup || mount -t cgroup2 none /sys/fs/cgroup || true
 
-# dockerd слушает и unix-сокет, и TCP — на TCP ходит прокси с хоста.
+# dockerd слушает unix-сокет и TCP с обязательным клиентским
+# TLS-сертификатом (tlsverify). TCP доступен с хоста (hostfwd qemu
+# на 127.0.0.1 или IP гостя в vmnet у darwin-vz), и без сертификата
+# туда мог бы постучаться любой локальный процесс, другая VM в vmnet
+# или веб-страница через DNS rebinding. Сертификаты приходят в apkovl.
 mkdir -p /etc/docker
 cat >/etc/docker/daemon.json <<'DAEMONEOF'
-{"hosts":["unix:///var/run/docker.sock","tcp://0.0.0.0:2375"],"storage-driver":"overlay2"}
+{"hosts":["unix:///var/run/docker.sock","tcp://0.0.0.0:@DOCKER_PORT@"],"tlsverify":true,"tlscacert":"/etc/docker/tls/ca.pem","tlscert":"/etc/docker/tls/server.pem","tlskey":"/etc/docker/tls/server-key.pem","storage-driver":"overlay2"}
 DAEMONEOF
 
 # Стартуем dockerd напрямую: OpenRC-сервис docker зависит от сервиса
@@ -93,9 +102,9 @@ done
 if docker info >/dev/null 2>&1; then
     echo "boxlet: dockerd запущен"
     # Мини-образ со статическим busybox для служебных операций с хоста:
-    # sync файловых систем перед остановкой VM (см. backend Stop).
+    # sync и штатное выключение гостевой ОС (см. backend.SyncGuest/PowerOffGuest).
     mkdir -p /tmp/boxlet-img
-    cp /bin/busybox /tmp/boxlet-img/
+    cp /bin/busybox.static /tmp/boxlet-img/busybox
     (cd /tmp/boxlet-img && tar -cf - busybox) | docker import - boxlet-agent:latest >/dev/null 2>&1 \
         && echo "boxlet: образ boxlet-agent готов"
 else
@@ -121,6 +130,34 @@ else
 fi
 `
 
+// shutdownScript — /etc/local.d/boxlet.stop: при штатном выключении
+// (хост шлёт USR2 в init гостя → poweroff) OpenRC останавливает сервис
+// local, и мы успеваем корректно погасить dockerd и сбросить data-диск
+// до mount-ro.
+const shutdownScript = `#!/bin/sh
+exec >/dev/console 2>&1
+echo "boxlet shutdown: останавливаю dockerd"
+pid=$(cat /var/run/docker.pid 2>/dev/null)
+if [ -n "$pid" ]; then
+    kill -TERM "$pid" 2>/dev/null
+    i=0
+    while kill -0 "$pid" 2>/dev/null && [ $i -lt 20 ]; do
+        sleep 1
+        i=$((i+1))
+    done
+fi
+sync
+umount /var/lib/docker 2>/dev/null || true
+echo "boxlet shutdown: done"
+`
+
+// DockerPort — TCP-порт dockerd (только TLS с клиентским сертификатом)
+// внутри гостевой ОС. qemu пробрасывает на него порт docker_port
+// с 127.0.0.1 хоста, darwin-vz подключается к нему по IP гостя в vmnet.
+// Номер прежний (2375), чтобы старые конфиги с docker_port: 2375
+// продолжали работать; 2376 занят гостевым агентом (AgentPort).
+const DockerPort = 2375
+
 const networkInterfaces = `auto lo
 iface lo inet loopback
 
@@ -137,12 +174,13 @@ type tarFile struct {
 }
 
 // BuildApkovl генерирует apkovl.tar.gz — оверлей /etc для diskless-загрузки
-// Alpine: сеть, репозитории, автозапуск сервиса local с bootstrap-скриптом.
+// Alpine: сеть, репозитории, TLS-сертификаты dockerd (tls), автозапуск
+// сервиса local со скриптами запуска и остановки.
 // mounts — каталоги хоста для virtiofs-шар (darwin-vz); rosetta — включить
 // эмуляцию linux/amd64 через Rosetta; agent — статический бинарь
 // гостевого агента (boxlet shell), nil — shell будет недоступен;
 // token — токен аутентификации агента (см. AgentToken).
-func BuildApkovl(mirror, release string, mounts []string, rosetta bool, agent []byte, token string) ([]byte, error) {
+func BuildApkovl(mirror, release string, mounts []string, rosetta bool, agent []byte, token string, tls *certs.Bundle) ([]byte, error) {
 	repositories := fmt.Sprintf("%s/%s/main\n%s/%s/community\n", mirror, release, mirror, release)
 
 	// Секция шар хоста и Rosetta для bootstrap-скрипта.
@@ -160,6 +198,7 @@ func BuildApkovl(mirror, release string, mounts []string, rosetta bool, agent []
 		extra.WriteString(rosettaScript)
 	}
 	script := fmt.Sprintf(bootstrapScript, extra.String())
+	script = strings.ReplaceAll(script, "@DOCKER_PORT@", strconv.Itoa(DockerPort))
 
 	files := []tarFile{
 		{name: "etc/network/", mode: 0o755},
@@ -174,6 +213,12 @@ func BuildApkovl(mirror, release string, mounts []string, rosetta bool, agent []
 		{name: "etc/runlevels/boot/networking", mode: 0o777, linkname: "/etc/init.d/networking"},
 		{name: "etc/local.d/", mode: 0o755},
 		{name: "etc/local.d/boxlet.start", body: []byte(script), mode: 0o755},
+		{name: "etc/local.d/boxlet.stop", body: []byte(shutdownScript), mode: 0o755},
+		{name: "etc/docker/", mode: 0o755},
+		{name: "etc/docker/tls/", mode: 0o700},
+		{name: "etc/docker/tls/ca.pem", body: tls.CA, mode: 0o644},
+		{name: "etc/docker/tls/server.pem", body: tls.ServerCert, mode: 0o644},
+		{name: "etc/docker/tls/server-key.pem", body: tls.ServerKey, mode: 0o600},
 	}
 	if len(agent) > 0 {
 		files = append(files,

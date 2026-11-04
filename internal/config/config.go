@@ -46,8 +46,10 @@ type Config struct {
 	// (для портов, публикуемых контейнерами, напр. 80/443 веб-сервера).
 	ForwardedPorts []string `json:"forwarded_ports,omitempty"`
 
-	// DockerPort — порт, на котором dockerd в гостевой ОС слушает TCP,
-	// и на который он пробрасывается на 127.0.0.1 хоста.
+	// DockerPort — порт на 127.0.0.1 хоста, на который qemu пробрасывает
+	// TLS-порт dockerd из гостевой ОС (guest.DockerPort; доступ только
+	// по клиентскому сертификату из ~/.boxlet/certs). darwin-vz его не
+	// использует: он подключается к dockerd напрямую по IP гостя.
 	DockerPort int `json:"docker_port"`
 
 	// MAC — адрес сетевого интерфейса VM (darwin-vz): по нему демон

@@ -5,9 +5,21 @@ import (
 	"bytes"
 	"compress/gzip"
 	"io"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/alexandr-mironov/boxlet/internal/certs"
 )
+
+func testBundle(t *testing.T) *certs.Bundle {
+	t.Helper()
+	b, err := certs.Ensure(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
 
 // untar распаковывает apkovl в map имя → (тело, режим).
 func untar(t *testing.T, data []byte) map[string]tarFile {
@@ -39,8 +51,9 @@ func untar(t *testing.T, data []byte) map[string]tarFile {
 }
 
 func TestBuildApkovl(t *testing.T) {
+	bundle := testBundle(t)
 	data, err := BuildApkovl("https://mirror.example/alpine", "3.21",
-		[]string{"/Users/test/projects"}, true, []byte("AGENTBIN"), "tok123")
+		[]string{"/Users/test/projects"}, true, []byte("AGENTBIN"), "tok123", bundle)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,11 +78,30 @@ func TestBuildApkovl(t *testing.T) {
 	if string(tok.body) != "tok123" || tok.mode != 0o600 {
 		t.Errorf("токен: body=%q mode=%o (ожидал 600)", tok.body, tok.mode)
 	}
+
+	key := files["etc/docker/tls/server-key.pem"]
+	if !bytes.Equal(key.body, bundle.ServerKey) || key.mode != 0o600 {
+		t.Errorf("ключ dockerd: совпадает=%v mode=%o (ожидал 600)", bytes.Equal(key.body, bundle.ServerKey), key.mode)
+	}
+	if _, ok := files["etc/docker/tls/client-key.pem"]; ok {
+		t.Error("клиентский ключ не должен попадать в гостевую ОС")
+	}
+	if strings.Contains(boot, "@DOCKER_PORT@") || strings.Contains(boot, "%!") {
+		t.Error("bootstrap: не подставлен порт или ошибка форматирования")
+	}
+	for _, want := range []string{`"tlsverify":true`, "tcp://0.0.0.0:" + strconv.Itoa(DockerPort), "busybox.static"} {
+		if !strings.Contains(boot, want) {
+			t.Errorf("bootstrap: нет %q", want)
+		}
+	}
+	if !strings.Contains(string(files["etc/local.d/boxlet.stop"].body), "docker.pid") {
+		t.Error("нет stop-скрипта dockerd")
+	}
 }
 
 func TestBuildApkovlMinimal(t *testing.T) {
 	data, err := BuildApkovl("https://mirror.example/alpine", "latest-stable",
-		nil, false, nil, "")
+		nil, false, nil, "", testBundle(t))
 	if err != nil {
 		t.Fatal(err)
 	}
