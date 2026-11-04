@@ -10,10 +10,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/alexandr-mironov/boxlet/internal/config"
 	"github.com/alexandr-mironov/boxlet/internal/paths"
+	"github.com/alexandr-mironov/boxlet/internal/privhelper"
 )
 
 type check struct {
@@ -40,6 +43,7 @@ func cmdDoctor(args []string) error {
 		checkRegistryAuth(),
 		checkPlatform(cfg),
 		checkMounts(cfg),
+		checkPrivHelper(cfg),
 	}
 
 	failed := 0
@@ -107,7 +111,7 @@ func checkVarRunSock(socket string) check {
 	target, err := os.Readlink("/var/run/docker.sock")
 	if err != nil {
 		return check{"/var/run/docker.sock → сокет boxlet", false,
-			"выполните: sudo ln -s " + socket + " /var/run/docker.sock"}
+			"установите хелпер: boxlet priv install — или вручную: sudo ln -s " + socket + " /var/run/docker.sock"}
 	}
 	if target != socket {
 		return check{"/var/run/docker.sock → сокет boxlet", false,
@@ -185,4 +189,28 @@ func checkMounts(cfg *config.Config) check {
 		}
 	}
 	return check{"каталоги проектов расшарены (" + fmt.Sprint(cfg.Mounts) + ")", true, ""}
+}
+
+// checkPrivHelper проверяет setuid-хелпер, если в forwarded_ports
+// есть порты <1024 (их проброс без хелпера невозможен).
+func checkPrivHelper(cfg *config.Config) check {
+	if runtime.GOOS != "darwin" {
+		return check{"privileged helper", true, ""}
+	}
+	need := false
+	for _, spec := range cfg.ForwardedPorts {
+		host, _, _ := strings.Cut(spec, ":")
+		if p, err := strconv.Atoi(host); err == nil && p < 1024 {
+			need = true
+			break
+		}
+	}
+	if !need {
+		return check{"privileged helper (порты <1024 не запрошены)", true, ""}
+	}
+	if !privhelper.Installed() {
+		return check{"privileged helper (порты <1024)", false,
+			"установите: boxlet priv install (один раз, с паролем администратора)"}
+	}
+	return check{"privileged helper (порты <1024)", true, ""}
 }

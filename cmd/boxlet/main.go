@@ -35,6 +35,8 @@ func main() {
 		err = cmdDockerPassthrough(append([]string{"ps"}, os.Args[2:]...))
 	case "ui":
 		err = cmdUI(os.Args[2:])
+	case "priv":
+		err = cmdPriv(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Printf("boxlet %s\n", version)
 	case "help", "--help", "-h":
@@ -63,6 +65,7 @@ func usage() {
   boxlet shell     shell внутри VM бэкенда
   boxlet ps        список контейнеров (через docker CLI)
   boxlet ui        открыть веб-интерфейс
+  boxlet priv install   установить privileged helper (порты <1024, /var/run/docker.sock)
   boxlet version   версия
 
 Docker API доступен на ~/.boxlet/run/docker.sock

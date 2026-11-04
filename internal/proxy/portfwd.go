@@ -65,7 +65,7 @@ func (f *PortForwarder) SetPorts(ports map[int]int) {
 			// Логируем один раз на порт, пока причина не изменится.
 			reason := err.Error()
 			if hostPort < 1024 {
-				reason = "порт <1024 требует root"
+				reason = "порт <1024 требует root (или установите хелпер: boxlet priv install)"
 			}
 			if f.failed[hostPort] != reason {
 				f.failed[hostPort] = reason

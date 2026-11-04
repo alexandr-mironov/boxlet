@@ -21,7 +21,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,6 +31,7 @@ import (
 	"github.com/alexandr-mironov/boxlet/internal/config"
 	"github.com/alexandr-mironov/boxlet/internal/guest"
 	"github.com/alexandr-mironov/boxlet/internal/paths"
+	"github.com/alexandr-mironov/boxlet/internal/vmnet"
 )
 
 // bootTimeout — первая загрузка ставит пакеты из сети.
@@ -180,8 +180,8 @@ func (b *Backend) Start(ctx context.Context) error {
 		"--kernel", assets.Kernel,
 		"--initrd", assets.Initrd,
 		// console=hvc0 — серийная консоль virtio-console;
-		// apkovl по HTTP с адреса шлюза vmnet (см. guest.GatewayURL).
-		"--cmdline", "console=hvc0 ip=dhcp apkovl=" + netboot.ApkovlURLFor(guest.GatewayIP()),
+		// apkovl по HTTP с адреса шлюза vmnet (см. vmnet.GatewayIP).
+		"--cmdline", "console=hvc0 ip=dhcp apkovl=" + netboot.ApkovlURLFor(vmnet.GatewayIP()),
 		"--disk", assets.Modloop + ":ro",
 		"--disk", b.diskPath(),
 		"--cpus", strconv.Itoa(b.cfg.CPUs),
@@ -263,7 +263,7 @@ func (b *Backend) Start(ctx context.Context) error {
 func (b *Backend) waitGuestIP(ctx context.Context, timeout time.Duration) (string, error) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if ip, err := lookupLease(b.cfg.MAC); err == nil && ip != "" {
+		if ip, err := vmnet.LookupLease(b.cfg.MAC); err == nil && ip != "" {
 			return ip, nil
 		}
 		select {
@@ -273,47 +273,6 @@ func (b *Backend) waitGuestIP(ctx context.Context, timeout time.Duration) (strin
 		}
 	}
 	return "", fmt.Errorf("lease не найден за %s", timeout)
-}
-
-// Поля записи в /var/db/dhcpd_leases. Порядок полей в блоке не
-// гарантирован, а октеты MAC пишутся без ведущих нулей (4e:0:cc:…),
-// поэтому разбираем блоки целиком и нормализуем каждый октет.
-var (
-	leaseBlockRe = regexp.MustCompile(`(?s)\{([^}]*)\}`)
-	leaseIPRe    = regexp.MustCompile(`ip_address=([0-9.]+)`)
-	leaseHWRe    = regexp.MustCompile(`hw_address=1,([0-9a-fA-F:]+)`)
-)
-
-// normMAC приводит MAC к 12 шестнадцатеричным цифрам без разделителей.
-func normMAC(mac string) string {
-	parts := strings.Split(mac, ":")
-	var b strings.Builder
-	for _, p := range parts {
-		if len(p) == 1 {
-			b.WriteByte('0')
-		}
-		b.WriteString(strings.ToLower(p))
-	}
-	return b.String()
-}
-
-func lookupLease(mac string) (string, error) {
-	data, err := os.ReadFile("/var/db/dhcpd_leases")
-	if err != nil {
-		return "", err
-	}
-	want := normMAC(mac)
-	for _, block := range leaseBlockRe.FindAllSubmatch(data, -1) {
-		hw := leaseHWRe.FindSubmatch(block[1])
-		ip := leaseIPRe.FindSubmatch(block[1])
-		if hw == nil || ip == nil {
-			continue
-		}
-		if normMAC(string(hw[1])) == want {
-			return string(ip[1]), nil
-		}
-	}
-	return "", nil
 }
 
 // waitDocker ждёт ответа dockerd по TCP.
@@ -394,7 +353,7 @@ func (b *Backend) GuestIP() (string, error) {
 	ip := b.guestIP
 	b.mu.Unlock()
 	if ip == "" {
-		if ip2, err := lookupLease(b.cfg.MAC); err == nil {
+		if ip2, err := vmnet.LookupLease(b.cfg.MAC); err == nil {
 			ip = ip2
 		}
 	}

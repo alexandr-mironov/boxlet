@@ -31,9 +31,9 @@
       монтируются по тем же путям, что на хосте)
 - [x] прозрачный проброс портов на 127.0.0.1: userspace-форвардер следит
       за публикациями контейнеров (опрос dockerd) + статический список
-      `forwarded_ports`; порты <1024 требуют root
+      `forwarded_ports`; порты <1024 — через setuid-хелпер `boxlet-priv`
+      (`boxlet priv install`)
 - [ ] vsock-канал вместо TCP для прокси сокета
-- [ ] проброс портов <1024 без root (privileged helper)
 
 ## M3 — Windows
 

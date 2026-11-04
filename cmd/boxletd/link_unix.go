@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+
+	"github.com/alexandr-mironov/boxlet/internal/privhelper"
 )
 
 // linkDockerSock создаёт /var/run/docker.sock → <socket> —
@@ -26,15 +28,24 @@ func linkDockerSock(socket string) error {
 			"остановите Docker Desktop/OrbStack или перенастройте вручную", dst)
 	}
 
-	// /var/run требует root: используем sudo неинтерактивно; если sudo
-	// потребует пароль, вернём понятную инструкцию.
+	// /var/run требует root: сначала пробуем setuid-хелпер boxlet-priv
+	// (устанавливается `boxlet priv install`, без пароля в терминале),
+	// иначе sudo неинтерактивно.
+	if privhelper.Installed() {
+		if path, err := privhelper.Path(); err == nil {
+			if out, err := exec.Command(path, "link").CombinedOutput(); err != nil {
+				return fmt.Errorf("boxlet-priv link: %v (%s)", err, string(out))
+			}
+			return nil
+		}
+	}
 	cmd := exec.Command("sudo", "-n", "ln", "-s", socket, dst)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		if errors.Is(err, exec.ErrNotFound) {
 			return fmt.Errorf("sudo не найден")
 		}
-		return fmt.Errorf("нужен пароль sudo, выполните вручную: sudo ln -s %s %s (%s)",
-			socket, dst, string(out))
+		return fmt.Errorf("нужен пароль sudo; установите хелпер: boxlet priv install "+
+			"— или выполните вручную: sudo ln -s %s %s (%s)", socket, dst, string(out))
 	}
 	return nil
 }

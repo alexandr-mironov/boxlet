@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -25,6 +26,7 @@ import (
 	_ "github.com/alexandr-mironov/boxlet/internal/backend/qemu"
 	"github.com/alexandr-mironov/boxlet/internal/config"
 	"github.com/alexandr-mironov/boxlet/internal/paths"
+	"github.com/alexandr-mironov/boxlet/internal/privhelper"
 	"github.com/alexandr-mironov/boxlet/internal/proxy"
 	"github.com/alexandr-mironov/boxlet/internal/webui"
 )
@@ -42,6 +44,7 @@ type daemon struct {
 	fwdMu     sync.Mutex
 	fwd       *proxy.PortForwarder
 	fwdCancel context.CancelFunc
+	privCmd   *exec.Cmd // boxlet-priv: порты <1024
 }
 
 func main() {
@@ -170,12 +173,54 @@ func (d *daemon) startPortForwarding() {
 	ctx, cancel := context.WithCancel(context.Background())
 	d.fwd = fwd
 	d.fwdCancel = cancel
+	d.privCmd = d.startPrivHelperLocked()
 	go d.portForwardLoop(ctx, fwd)
+}
+
+// startPrivHelperLocked запускает setuid-хелпер boxlet-priv, если он
+// установлен и в forwarded_ports есть порты <1024. Хелпер сам читает
+// конфиг и биндит эти порты на 127.0.0.1 с последующим сбросом прав.
+func (d *daemon) startPrivHelperLocked() *exec.Cmd {
+	ports, err := proxy.ParsePortSpecs(d.cfg.ForwardedPorts)
+	if err != nil {
+		return nil
+	}
+	needPriv := false
+	for host := range ports {
+		if host < 1024 {
+			needPriv = true
+			break
+		}
+	}
+	if !needPriv || !privhelper.Installed() {
+		return nil
+	}
+	path, err := privhelper.Path()
+	if err != nil {
+		return nil
+	}
+	cmd := exec.Command(path, "forward")
+	logFile, err := os.OpenFile(filepath.Join(d.layout.LogsDir, "boxlet-priv.log"),
+		os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err == nil {
+		cmd.Stdout, cmd.Stderr = logFile, logFile
+	}
+	if err := cmd.Start(); err != nil {
+		log.Printf("boxletd: boxlet-priv: %v", err)
+		return nil
+	}
+	log.Printf("boxletd: boxlet-priv запущен (pid %d): порты <1024 из forwarded_ports", cmd.Process.Pid)
+	return cmd
 }
 
 func (d *daemon) stopPortForwarding() {
 	d.fwdMu.Lock()
 	defer d.fwdMu.Unlock()
+	if d.privCmd != nil && d.privCmd.Process != nil {
+		d.privCmd.Process.Signal(syscall.SIGTERM)
+		d.privCmd.Wait()
+		d.privCmd = nil
+	}
 	if d.fwdCancel == nil {
 		return
 	}
@@ -209,6 +254,15 @@ func (d *daemon) reconcilePorts(ctx context.Context, fwd *proxy.PortForwarder) {
 		log.Printf("boxletd: конфиг forwarded_ports: %v", err)
 		ports = map[int]int{}
 	}
+	// Порты <1024 обслуживает setuid-хелпер boxlet-priv — не пытаемся
+	// слушать их в основном процессе (не сработает и засоряет лог).
+	if d.privActive() {
+		for host := range ports {
+			if host < 1024 {
+				delete(ports, host)
+			}
+		}
+	}
 
 	// dockerd публикует порты контейнеров на 0.0.0.0 гостевой ОС;
 	// пробрасываем каждый такой TCP-порт на 127.0.0.1 хоста.
@@ -233,6 +287,16 @@ func (d *daemon) reconcilePorts(ctx context.Context, fwd *proxy.PortForwarder) {
 		}
 	}
 	fwd.SetPorts(ports)
+}
+
+// privActive сообщает, жив ли setuid-хелпер привилегированных портов.
+func (d *daemon) privActive() bool {
+	d.fwdMu.Lock()
+	defer d.fwdMu.Unlock()
+	if d.privCmd == nil || d.privCmd.Process == nil {
+		return false
+	}
+	return d.privCmd.Process.Signal(syscall.Signal(0)) == nil
 }
 
 // startError возвращает ошибку последней попытки запуска, если была.
