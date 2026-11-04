@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -51,9 +52,8 @@ func untar(t *testing.T, data []byte) map[string]tarFile {
 }
 
 func TestBuildApkovl(t *testing.T) {
-	bundle := testBundle(t)
 	data, err := BuildApkovl("https://mirror.example/alpine", "3.21",
-		[]string{"/Users/test/projects"}, true, []byte("AGENTBIN"), "tok123", bundle)
+		[]string{"/Users/test/projects"}, true, []byte("AGENTBIN"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,22 +74,21 @@ func TestBuildApkovl(t *testing.T) {
 	if !bytes.Equal(files["usr/local/bin/boxlet-agent"].body, []byte("AGENTBIN")) {
 		t.Error("бинарь агента не вошёл в apkovl")
 	}
-	tok := files["etc/boxlet-agent.token"]
-	if string(tok.body) != "tok123" || tok.mode != 0o600 {
-		t.Errorf("токен: body=%q mode=%o (ожидал 600)", tok.body, tok.mode)
+	// URL оверлея виден в kernel cmdline (логи VM): секретов в нём быть не должно.
+	for name := range files {
+		if strings.HasPrefix(name, "etc/docker/tls/") || name == "etc/boxlet-agent.token" {
+			t.Errorf("секрет %s не должен попадать в apkovl", name)
+		}
 	}
-
-	key := files["etc/docker/tls/server-key.pem"]
-	if !bytes.Equal(key.body, bundle.ServerKey) || key.mode != 0o600 {
-		t.Errorf("ключ dockerd: совпадает=%v mode=%o (ожидал 600)", bytes.Equal(key.body, bundle.ServerKey), key.mode)
+	if strings.Contains(boot, "@") || strings.Contains(boot, "%!") {
+		t.Error("bootstrap: не подставлен плейсхолдер или ошибка форматирования")
 	}
-	if _, ok := files["etc/docker/tls/client-key.pem"]; ok {
-		t.Error("клиентский ключ не должен попадать в гостевую ОС")
-	}
-	if strings.Contains(boot, "@DOCKER_PORT@") || strings.Contains(boot, "%!") {
-		t.Error("bootstrap: не подставлен порт или ошибка форматирования")
-	}
-	for _, want := range []string{`"tlsverify":true`, "tcp://0.0.0.0:" + strconv.Itoa(DockerPort), "busybox.static"} {
+	for _, want := range []string{
+		`"tlsverify":true`, "tcp://0.0.0.0:" + strconv.Itoa(DockerPort), "busybox.static",
+		"/sys/firmware/qemu_fw_cfg/by_name/" + SecretsFwCfgName + "/raw",
+		"mount -t virtiofs -o ro " + SecretsShareTag,
+		"[ -s /etc/boxlet-agent.token ]",
+	} {
 		if !strings.Contains(boot, want) {
 			t.Errorf("bootstrap: нет %q", want)
 		}
@@ -101,17 +100,61 @@ func TestBuildApkovl(t *testing.T) {
 
 func TestBuildApkovlMinimal(t *testing.T) {
 	data, err := BuildApkovl("https://mirror.example/alpine", "latest-stable",
-		nil, false, nil, "", testBundle(t))
+		nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	files := untar(t, data)
 	boot := string(files["etc/local.d/boxlet.start"].body)
-	if strings.Contains(boot, "virtiofs") || strings.Contains(boot, "Rosetta") {
+	// virtiofs в bootstrap есть всегда (шара секретов darwin-vz),
+	// а шар каталогов пользователя без mounts быть не должно.
+	if strings.Contains(boot, "virtiofs share") || strings.Contains(boot, "Rosetta") {
 		t.Error("без mounts/rosetta в bootstrap не должно быть virtiofs и Rosetta")
 	}
 	if _, ok := files["usr/local/bin/boxlet-agent"]; ok {
 		t.Error("без бинаря агента его не должно быть в apkovl")
+	}
+}
+
+func TestWriteSecrets(t *testing.T) {
+	root := t.TempDir()
+	bundle := testBundle(t)
+	path, err := WriteSecrets(root, "tok123", bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("файл секретов: %v, права %v (ожидал 600)", err, fi.Mode().Perm())
+	}
+	if fi, _ := os.Stat(SecretsDir(root)); fi.Mode().Perm() != 0o700 {
+		t.Errorf("каталог секретов: права %v (ожидал 700)", fi.Mode().Perm())
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Несжатый tar: busybox tar в госте распаковывает его без gzip.
+	tr := tar.NewReader(bytes.NewReader(data))
+	files := map[string]tarFile{}
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(tr)
+		files[hdr.Name] = tarFile{body: body, mode: hdr.Mode}
+	}
+	if tok := files["etc/boxlet-agent.token"]; string(tok.body) != "tok123" || tok.mode != 0o600 {
+		t.Errorf("токен: body=%q mode=%o (ожидал 600)", tok.body, tok.mode)
+	}
+	if key := files["etc/docker/tls/server-key.pem"]; !bytes.Equal(key.body, bundle.ServerKey) || key.mode != 0o600 {
+		t.Errorf("ключ dockerd: mode=%o (ожидал 600) или не совпадает", key.mode)
+	}
+	if _, ok := files["etc/docker/tls/client-key.pem"]; ok {
+		t.Error("клиентский ключ не должен попадать в гостевую ОС")
 	}
 }
 

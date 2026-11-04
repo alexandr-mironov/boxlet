@@ -215,8 +215,14 @@ func (b *Backend) Start(ctx context.Context) error {
 		b.setState("error", err.Error())
 		return err
 	}
-	apkovl, err := guest.BuildApkovl(b.cfg.AlpineMirror, b.cfg.AlpineRelease, b.cfg.Mounts, b.cfg.Rosetta, agent, token, bundle)
+	apkovl, err := guest.BuildApkovl(b.cfg.AlpineMirror, b.cfg.AlpineRelease, b.cfg.Mounts, b.cfg.Rosetta, agent)
 	if err != nil {
+		b.setState("error", err.Error())
+		return err
+	}
+	// Секреты гостя — virtiofs-шарой каталога 0700, а не в apkovl
+	// (см. guest.WriteSecrets).
+	if _, err := guest.WriteSecrets(b.layout.Root, token, bundle); err != nil {
 		b.setState("error", err.Error())
 		return err
 	}
@@ -238,8 +244,8 @@ func (b *Backend) Start(ctx context.Context) error {
 	}
 
 	// Все интерфейсы: мост vmnet появляется только вместе с VM.
-	// Оверлей (в нём TLS-ключ dockerd и токен агента) защищён
-	// случайным путём и закрывается после загрузки.
+	// Секретов в оверлее нет; случайный путь и закрытие после загрузки —
+	// просто чтобы не раздавать его дольше нужного.
 	netboot, err := guest.ServeNetboot("", apkovl)
 	if err != nil {
 		b.setState("error", err.Error())
@@ -269,6 +275,7 @@ func (b *Backend) Start(ctx context.Context) error {
 	for i, m := range b.cfg.Mounts {
 		args = append(args, "--share", fmt.Sprintf("share%d=%s", i, m))
 	}
+	args = append(args, "--share", guest.SecretsShareTag+"="+guest.SecretsDir(b.layout.Root))
 	if b.cfg.Rosetta {
 		args = append(args, "--rosetta")
 	}
@@ -418,13 +425,13 @@ func (b *Backend) Stop(ctx context.Context) error {
 	b.mu.Unlock()
 
 	// sync гостевой ФС перед остановкой, чтобы не потерять данные dockerd.
-	if err := backend.SyncGuest(b.dialDocker); err != nil {
+	if err := backend.SyncGuest(b.Exec, b.dialDocker); err != nil {
 		log.Printf("boxlet/darwin-vz: sync гостевой ОС не удался: %v", err)
 	}
 
 	// Штатное выключение гостя: helper завершится вместе с VM.
 	b.setState("stopping", "выключаю гостевую ОС")
-	if err := backend.PowerOffGuest(b.dialDocker); err != nil {
+	if err := backend.PowerOffGuest(b.Exec, b.dialDocker); err != nil {
 		log.Printf("boxlet/darwin-vz: штатное выключение не удалось: %v", err)
 	} else {
 		deadline := time.Now().Add(powerdownTimeout)
@@ -554,7 +561,8 @@ func (b *Backend) running() bool {
 }
 
 // helperPID читает pid-файл и проверяет, что процесс жив и это именно
-// boxlet-vm (pid мог быть переиспользован другой программой).
+// boxlet-vm этого инстанса (pid мог быть переиспользован другой
+// программой или принадлежать helper'у другого BOXLET_HOME).
 func (b *Backend) helperPID() (int, error) {
 	data, err := os.ReadFile(b.pidPath())
 	if err != nil {
@@ -571,6 +579,12 @@ func (b *Backend) helperPID() (int, error) {
 	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
 	if err != nil || !strings.Contains(string(out), "boxlet-vm") {
 		return 0, fmt.Errorf("pid %d — не boxlet-vm (%s)", pid, strings.TrimSpace(string(out)))
+	}
+	// Тот же helper другого инстанса (другой BOXLET_HOME) — не наш:
+	// в его аргументах другой диск данных.
+	args, err := exec.Command("ps", "-ww", "-p", strconv.Itoa(pid), "-o", "args=").Output()
+	if err != nil || !strings.Contains(string(args), "--disk "+b.diskPath()) {
+		return 0, fmt.Errorf("pid %d — boxlet-vm другого инстанса", pid)
 	}
 	return pid, nil
 }

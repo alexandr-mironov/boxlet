@@ -211,7 +211,12 @@ func (b *Backend) start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	apkovl, err := guest.BuildApkovl(b.cfg.AlpineMirror, b.cfg.AlpineRelease, nil, false, agent, token, bundle)
+	apkovl, err := guest.BuildApkovl(b.cfg.AlpineMirror, b.cfg.AlpineRelease, nil, false, agent)
+	if err != nil {
+		return err
+	}
+	// Секреты гостя — через fw_cfg, а не в apkovl (см. guest.WriteSecrets).
+	secrets, err := guest.WriteSecrets(b.layout.Root, token, bundle)
 	if err != nil {
 		return err
 	}
@@ -228,7 +233,7 @@ func (b *Backend) start(ctx context.Context) error {
 	}
 	defer netboot.Close()
 
-	args, err := b.qemuArgs(assets, netboot)
+	args, err := b.qemuArgs(assets, netboot, secrets)
 	if err != nil {
 		return err
 	}
@@ -283,9 +288,17 @@ func (b *Backend) start(ctx context.Context) error {
 		return fmt.Errorf("qemu завершился во время загрузки (см. %s и %s)",
 			filepath.Join(b.layout.LogsDir, "qemu.log"), b.serialLog())
 	default:
-		b.Stop(context.Background())
+		b.failBoot(cmd.Process, exited)
 		return fmt.Errorf("dockerd не поднялся: %w (см. %s)", err, b.serialLog())
 	}
+}
+
+// failBoot выключает VM, так и не дождавшуюся dockerd. В отличие от Stop
+// не отменяет контекст текущего Start: иначе Start вернул бы «запуск
+// прерван остановкой VM» вместо настоящей причины (таймаут, путь к логу).
+func (b *Backend) failBoot(proc *os.Process, exited <-chan struct{}) {
+	b.setState("stopping", "dockerd не поднялся, останавливаю VM")
+	b.shutdown(context.Background(), proc, exited)
 }
 
 // adoptOrphan ищет qemu, оставшийся от прошлого запуска демона.
@@ -330,8 +343,8 @@ func (b *Backend) adoptOrphan(ctx context.Context) (adopted bool, err error) {
 	return false, ctx.Err()
 }
 
-// orphanProcess возвращает живой qemu из pidfile или nil.
-// Имя процесса проверяется: pid мог достаться другой программе.
+// orphanProcess возвращает живой qemu этого инстанса из pidfile или nil.
+// pid мог достаться другой программе или чужой VM — см. ownsProcess.
 func (b *Backend) orphanProcess() *os.Process {
 	data, err := os.ReadFile(b.pidPath())
 	if err != nil {
@@ -345,11 +358,28 @@ func (b *Backend) orphanProcess() *os.Process {
 	if err != nil || proc.Signal(syscall.Signal(0)) != nil {
 		return nil
 	}
-	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
-	if err != nil || !strings.HasPrefix(filepath.Base(strings.TrimSpace(string(out))), "qemu-system") {
+	if !b.ownsProcess(pid) {
 		return nil
 	}
 	return proc
+}
+
+// ownsProcess проверяет, что pid — qemu именно этого инстанса: в его
+// командной строке должны быть наш диск данных и наш pidfile (оба внутри
+// ~/.boxlet). Одного имени qemu-system* мало: устаревший pidfile может
+// указывать на чужую VM того же пользователя, и ей нельзя слать сигналы.
+func (b *Backend) ownsProcess(pid int) bool {
+	comm, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
+	if err != nil || !strings.HasPrefix(filepath.Base(strings.TrimSpace(string(comm))), "qemu-system") {
+		return false
+	}
+	// -ww: без обрезки длинной командной строки.
+	args, err := exec.Command("ps", "-ww", "-p", strconv.Itoa(pid), "-o", "args=").Output()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(args), "file="+b.diskPath()+",") &&
+		strings.Contains(string(args), "-pidfile "+b.pidPath())
 }
 
 // processExited снимает регистрацию завершившегося qemu.
@@ -366,7 +396,7 @@ func (b *Backend) processExited(proc *os.Process, exited chan struct{}) {
 }
 
 // qemuArgs собирает аргументы командной строки qemu.
-func (b *Backend) qemuArgs(assets *guest.Assets, nb *guest.NetbootServer) ([]string, error) {
+func (b *Backend) qemuArgs(assets *guest.Assets, nb *guest.NetbootServer, secrets string) ([]string, error) {
 	var machine, cpu, console string
 	switch runtime.GOOS + "/" + runtime.GOARCH {
 	case "darwin/arm64":
@@ -413,6 +443,9 @@ func (b *Backend) qemuArgs(assets *guest.Assets, nb *guest.NetbootServer) ([]str
 		"-display", "none",
 		"-serial", "file:" + b.serialLog(),
 		"-pidfile", b.pidPath(),
+		// Секреты гостя: в аргументах виден только путь к файлу (0600),
+		// содержимое в госте читает только root из sysfs.
+		"-fw_cfg", "name=" + guest.SecretsFwCfgName + ",file=" + secrets,
 	}
 	return args, nil
 }
@@ -509,12 +542,12 @@ func (b *Backend) shutdown(ctx context.Context, proc *os.Process, exited <-chan 
 	// sync до всего остального: если штатное выключение не сработает,
 	// SIGTERM хотя бы не потеряет данные из page cache гостя.
 	b.setState("stopping", "сбрасываю данные на диск (sync)")
-	if err := backend.SyncGuest(b.dialDocker); err != nil {
+	if err := backend.SyncGuest(b.Exec, b.dialDocker); err != nil {
 		log.Printf("boxlet/qemu: sync гостевой ОС не удался: %v", err)
 	}
 
 	b.setState("stopping", "выключаю гостевую ОС")
-	if err := backend.PowerOffGuest(b.dialDocker); err != nil {
+	if err := backend.PowerOffGuest(b.Exec, b.dialDocker); err != nil {
 		log.Printf("boxlet/qemu: штатное выключение не удалось: %v", err)
 	} else if ok, err := waitExit(ctx, exited, powerdownTimeout); err != nil {
 		return err

@@ -48,8 +48,8 @@ Diskless Alpine Linux в qemu:
   в VM по HTTP через slirp-адрес хоста 10.0.2.2; сервер слушает только
   127.0.0.1, отдаёт оверлей по случайному пути из kernel cmdline
   и закрывается после готовности dockerd): сеть, репозитории,
-  TLS-сертификаты dockerd, токен агента, скрипты запуска и остановки
-  в /etc/local.d
+  бинарь агента, скрипты запуска и остановки в /etc/local.d.
+  Секретов в оверлее нет — см. «Секреты гостевой ОС»
 - bootstrap ставит `docker` из apk, монтирует qcow2-диск под
   /var/lib/docker, поднимает dockerd на unix-сокете и TCP 2375
   только с `tlsverify`
@@ -57,8 +57,9 @@ Diskless Alpine Linux в qemu:
   на `127.0.0.1:<docker_port>` и порты из `forwarded_ports` на localhost
 - `Stop` во время загрузки прерывает `Start`; смерть qemu при загрузке
   обнаруживается сразу, а не по таймауту
-- если демон упал, а VM осталась (pid из `run/qemu.pid`, процесс
-  проверяется по имени), следующий `start` подхватывает её без
+- если демон упал, а VM осталась (pid из `run/qemu.pid`; процесс
+  считается своим, только если в его командной строке наш диск данных
+  и наш pidfile), следующий `start` подхватывает её без
   перезагрузки, если dockerd отвечает, иначе выключает и грузит заново
 - ускорение: hvf на macOS, kvm на Linux
 
@@ -83,8 +84,7 @@ helper-бинарь `boxlet-vm` (Swift, тонкая обёртка над VZ, �
   `guestIP:2375` — по TLS с клиентским сертификатом, как у qemu;
   hostfwd не нужен
 - netboot-сервер слушает все интерфейсы (мост vmnet появляется только
-  вместе с VM), оверлей защищён случайным путём и закрывается после
-  загрузки
+  вместе с VM); секретов в оверлее нет, сервер закрывается после загрузки
 - Rosetta для linux/amd64 (`VZLinuxRosettaDirectoryShare`, тег rosetta,
   в гостевой ОС регистрируется binfmt_misc)
 - virtiofs-шары каталогов из `mounts`: в гостевой ОС монтируются по тем
@@ -157,6 +157,24 @@ stdin после attach-запроса) пробрасывается через 
 Полноценный desktop GUI планируется поверх того же API демона
 (см. docs/roadmap.md).
 
+## Секреты гостевой ОС
+
+TLS-пара dockerd и токен агента не кладутся в apkovl: URL оверлея
+передаётся в kernel cmdline, а её печатает серийная консоль (логи VM,
+`/api/logs?name=vm`) и видно в аргументах процесса VM. Вместо этого
+`guest.WriteSecrets` пишет несжатый tar в `~/.boxlet/run/guest-secrets/`
+(каталог 0700, файл 0600), и гость получает его по каналу, недоступному
+с хоста посторонним:
+
+- qemu: `-fw_cfg name=opt/boxlet/secrets,file=…` — в аргументах виден
+  только путь; в госте `/sys/firmware/qemu_fw_cfg/by_name/…/raw`
+  (читает только root)
+- darwin-vz: virtiofs-шара `boxlet-secrets` этого каталога, монтируется
+  read-only на время распаковки
+
+Без секретов dockerd с `tlsverify` и агент не запускаются (агент без
+токена завершается сам).
+
 ## Доступ к dockerd и остановка VM (оба VM-бэкенда)
 
 - dockerd в госте слушает TCP только с `tlsverify`: CA, серверный
@@ -165,10 +183,12 @@ stdin после attach-запроса) пробрасывается через 
   клиентского сертификата к порту dockerd не подключиться ни другому
   локальному процессу, ни другой VM в vmnet, ни веб-странице через
   DNS rebinding. Публичный `~/.boxlet/run/docker.sock` — 0600
-- остановка: `sync` и затем USR2 в init гостя через служебный контейнер
-  `boxlet-agent` (`--pid=host`, статический busybox) — штатный poweroff
-  с `openrc shutdown`, `local.d/boxlet.stop` гасит dockerd и отмонтирует
-  data-диск. SIGTERM/SIGKILL процесса VM — только если гость не
+- остановка: `sync` и затем USR2 в init гостя через гостевой агент
+  (не зависит от хранилища образов Docker — `docker system prune -a`
+  ему не мешает); если агента в VM нет — через служебный контейнер
+  `boxlet-agent` (`--pid=host`, статический busybox). Это штатный
+  poweroff с `openrc shutdown`, `local.d/boxlet.stop` гасит dockerd
+  и отмонтирует data-диск. SIGTERM/SIGKILL процесса VM — только если гость не
   выключился за 30 с. (`system_powerdown` в qemu не подходит: в Alpine
   virt-ядре на arm нет gpio-keys, гость кнопку питания не видит)
 

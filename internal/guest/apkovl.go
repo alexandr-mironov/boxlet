@@ -7,9 +7,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
-
-	"github.com/alexandr-mironov/boxlet/internal/certs"
 )
 
 // bootstrapScript — скрипт первой загрузки гостевой ОС.
@@ -47,6 +44,26 @@ modprobe overlay || true
 # ext4 нужен для data-диска; на чистой системе модуль ещё не загружен.
 modprobe ext4 || true
 %s
+# Секреты гостя (TLS-пара dockerd, токен агента) приходят не в apkovl —
+# его URL виден в kernel cmdline, а значит, в логах VM. qemu отдаёт их
+# через fw_cfg, darwin-vz — virtiofs-шарой (см. guest.WriteSecrets).
+# Без секретов dockerd с tlsverify и агент не запустятся — так и задумано.
+SECRETS=""
+if modprobe qemu_fw_cfg 2>/dev/null && [ -r /sys/firmware/qemu_fw_cfg/by_name/@SECRETS_FWCFG@/raw ]; then
+    SECRETS=/sys/firmware/qemu_fw_cfg/by_name/@SECRETS_FWCFG@/raw
+else
+    modprobe virtiofs 2>/dev/null || true
+    mkdir -p /run/boxlet-secrets
+    if mount -t virtiofs -o ro @SECRETS_TAG@ /run/boxlet-secrets 2>/dev/null; then
+        SECRETS=/run/boxlet-secrets/@SECRETS_FILE@
+    fi
+fi
+if [ -n "$SECRETS" ] && tar -xf "$SECRETS" -C /; then
+    echo "boxlet: секреты гостя загружены"
+else
+    echo "boxlet: секреты гостя НЕ найдены — dockerd и агент не запустятся"
+fi
+mountpoint -q /run/boxlet-secrets && umount /run/boxlet-secrets
 # Data-диск под данные dockerd: первый virtio-диск, который не modloop.
 DATA_DEV=""
 for d in /dev/vd?; do
@@ -88,7 +105,8 @@ DAEMONEOF
 /usr/bin/dockerd --config-file=/etc/docker/daemon.json >/var/log/dockerd.log 2>&1 &
 
 # Агент boxlet shell (приезжает внутри apkovl, если собран на хосте).
-if [ -x /usr/local/bin/boxlet-agent ]; then
+# Без токена агент не стартует (он сам тоже откажется работать без него).
+if [ -x /usr/local/bin/boxlet-agent ] && [ -s /etc/boxlet-agent.token ]; then
     /usr/local/bin/boxlet-agent >/var/log/boxlet-agent.log 2>&1 &
 fi
 
@@ -174,13 +192,13 @@ type tarFile struct {
 }
 
 // BuildApkovl генерирует apkovl.tar.gz — оверлей /etc для diskless-загрузки
-// Alpine: сеть, репозитории, TLS-сертификаты dockerd (tls), автозапуск
-// сервиса local со скриптами запуска и остановки.
+// Alpine: сеть, репозитории, автозапуск сервиса local со скриптами запуска
+// и остановки. Секретов в оверлее нет (см. WriteSecrets): его URL виден
+// в kernel cmdline.
 // mounts — каталоги хоста для virtiofs-шар (darwin-vz); rosetta — включить
 // эмуляцию linux/amd64 через Rosetta; agent — статический бинарь
-// гостевого агента (boxlet shell), nil — shell будет недоступен;
-// token — токен аутентификации агента (см. AgentToken).
-func BuildApkovl(mirror, release string, mounts []string, rosetta bool, agent []byte, token string, tls *certs.Bundle) ([]byte, error) {
+// гостевого агента (boxlet shell), nil — shell будет недоступен.
+func BuildApkovl(mirror, release string, mounts []string, rosetta bool, agent []byte) ([]byte, error) {
 	repositories := fmt.Sprintf("%s/%s/main\n%s/%s/community\n", mirror, release, mirror, release)
 
 	// Секция шар хоста и Rosetta для bootstrap-скрипта.
@@ -198,7 +216,12 @@ func BuildApkovl(mirror, release string, mounts []string, rosetta bool, agent []
 		extra.WriteString(rosettaScript)
 	}
 	script := fmt.Sprintf(bootstrapScript, extra.String())
-	script = strings.ReplaceAll(script, "@DOCKER_PORT@", strconv.Itoa(DockerPort))
+	script = strings.NewReplacer(
+		"@DOCKER_PORT@", strconv.Itoa(DockerPort),
+		"@SECRETS_FWCFG@", SecretsFwCfgName,
+		"@SECRETS_TAG@", SecretsShareTag,
+		"@SECRETS_FILE@", SecretsFileName,
+	).Replace(script)
 
 	files := []tarFile{
 		{name: "etc/network/", mode: 0o755},
@@ -214,49 +237,19 @@ func BuildApkovl(mirror, release string, mounts []string, rosetta bool, agent []
 		{name: "etc/local.d/", mode: 0o755},
 		{name: "etc/local.d/boxlet.start", body: []byte(script), mode: 0o755},
 		{name: "etc/local.d/boxlet.stop", body: []byte(shutdownScript), mode: 0o755},
-		{name: "etc/docker/", mode: 0o755},
-		{name: "etc/docker/tls/", mode: 0o700},
-		{name: "etc/docker/tls/ca.pem", body: tls.CA, mode: 0o644},
-		{name: "etc/docker/tls/server.pem", body: tls.ServerCert, mode: 0o644},
-		{name: "etc/docker/tls/server-key.pem", body: tls.ServerKey, mode: 0o600},
 	}
 	if len(agent) > 0 {
 		files = append(files,
 			tarFile{name: "usr/local/bin/", mode: 0o755},
 			tarFile{name: "usr/local/bin/boxlet-agent", body: agent, mode: 0o755},
-			// Токен агента: только root гостевой ОС.
-			tarFile{name: "etc/boxlet-agent.token", body: []byte(token), mode: 0o600},
 		)
 	}
 
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
-
-	for _, f := range files {
-		hdr := &tar.Header{
-			Name:    f.name,
-			Mode:    f.mode,
-			ModTime: time.Now(),
-		}
-		switch {
-		case f.linkname != "":
-			hdr.Typeflag = tar.TypeSymlink
-			hdr.Linkname = f.linkname
-		case len(f.body) == 0 && f.name[len(f.name)-1] == '/':
-			hdr.Typeflag = tar.TypeDir
-		default:
-			hdr.Typeflag = tar.TypeReg
-			hdr.Size = int64(len(f.body))
-		}
-		if err := tw.WriteHeader(hdr); err != nil {
-			return nil, err
-		}
-		if hdr.Typeflag == tar.TypeReg {
-			if _, err := tw.Write(f.body); err != nil {
-				return nil, err
-			}
-		}
+	if err := writeTar(tw, files); err != nil {
+		return nil, err
 	}
 
 	if err := tw.Close(); err != nil {

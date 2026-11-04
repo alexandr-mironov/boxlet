@@ -13,9 +13,10 @@ import (
 // 10.0.2.2, darwin-vz-гостю через шлюз vmnet. Modloop отдельно не нужен:
 // он подключён к VM read-only диском.
 //
-// В apkovl лежат TLS-ключ dockerd и токен агента, поэтому оверлей
-// отдаётся только по случайному пути (токен попадает в VM через kernel
-// cmdline), а сервер живёт только до готовности dockerd.
+// Секретов в apkovl нет (URL виден в kernel cmdline, а её печатает
+// серийная консоль — см. WriteSecrets). Случайный путь и короткая жизнь
+// сервера — дополнительная мера: не раздавать оверлей с бинарём агента
+// посторонним дольше, чем нужно для загрузки.
 type NetbootServer struct {
 	srv   *http.Server
 	port  int
@@ -25,8 +26,7 @@ type NetbootServer struct {
 // ServeNetboot поднимает сервер на случайном порту адреса listenHost.
 // qemu передаёт "127.0.0.1": slirp ходит на 10.0.2.2 через loopback хоста.
 // darwin-vz передаёт "" (все интерфейсы): мост vmnet появляется только
-// вместе с VM, заранее привязаться к адресу шлюза нельзя — от чужих
-// запросов из сети защищает случайный путь.
+// вместе с VM, заранее привязаться к адресу шлюза нельзя.
 func ServeNetboot(listenHost string, apkovl []byte) (*NetbootServer, error) {
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {

@@ -29,16 +29,19 @@ const addr = ":2376"
 // tokenFile — токен кладётся в гостевую ОС через apkovl.
 const tokenFile = "/etc/boxlet-agent.token"
 
-// token — загружается при старте; пустой токен (файла нет) отключает
-// аутентификацию: такое бывает только в VM, собранной без apkovl boxlet.
+// token — загружается при старте. Без токена агент не работает:
+// это root-shell в гостевой ОС, а токен приходит отдельно от apkovl
+// (fw_cfg/virtiofs) и может не доехать — тогда безопаснее отказать.
 var token string
 
 func main() {
 	log.SetPrefix("boxlet-agent: ")
-	if data, err := os.ReadFile(tokenFile); err == nil {
-		token = strings.TrimSpace(string(data))
-	} else {
-		log.Printf("внимание: %s не найден, аутентификация отключена", tokenFile)
+	data, err := os.ReadFile(tokenFile)
+	if err != nil {
+		log.Fatalf("%s не найден — без токена агент не запускается: %v", tokenFile, err)
+	}
+	if token = strings.TrimSpace(string(data)); token == "" {
+		log.Fatalf("%s пуст — без токена агент не запускается", tokenFile)
 	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -62,7 +65,7 @@ func handle(conn net.Conn) {
 	if err != nil {
 		return
 	}
-	if token != "" && subtle.ConstantTimeCompare(
+	if subtle.ConstantTimeCompare(
 		[]byte(strings.TrimRight(auth, "\r\n")), []byte(token)) != 1 {
 		fmt.Fprint(conn, "boxlet-agent: неверный токен\n")
 		return

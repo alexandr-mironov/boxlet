@@ -5,8 +5,10 @@ import (
 	"errors"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -97,5 +99,95 @@ func TestOrphanProcessIgnoresForeignPID(t *testing.T) {
 	os.WriteFile(b.pidPath(), []byte("999999"), 0o644)
 	if p := b.orphanProcess(); p != nil {
 		t.Fatal("несуществующий pid принят за qemu")
+	}
+}
+
+// TestMain: в роли фейкового qemu тестовый бинарь просто спит
+// (см. fakeQemu).
+func TestMain(m *testing.M) {
+	if os.Getenv("BOXLET_FAKE_QEMU") == "1" {
+		time.Sleep(30 * time.Second)
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+// fakeQemu запускает процесс с именем qemu-system-fake (копия тестового
+// бинаря) и заданными аргументами — для проверки ownsProcess.
+func fakeQemu(t *testing.T, args ...string) *exec.Cmd {
+	t.Helper()
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(t.TempDir(), "qemu-system-fake")
+	if err := os.WriteFile(bin, data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bin, args...)
+	cmd.Env = append(os.Environ(), "BOXLET_FAKE_QEMU=1")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
+	// ps должен увидеть уже запущенный процесс с нашим именем.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		out, _ := exec.Command("ps", "-p", strconv.Itoa(cmd.Process.Pid), "-o", "comm=").Output()
+		if strings.Contains(string(out), "qemu-system-fake") {
+			return cmd
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("фейковый qemu не появился в ps")
+	return nil
+}
+
+// Чужой qemu того же пользователя не должен приниматься за VM инстанса.
+func TestOwnsProcessRequiresInstancePaths(t *testing.T) {
+	b := testBackend(t)
+
+	foreign := fakeQemu(t, "-drive", "file=/tmp/other.qcow2,if=virtio", "-pidfile", "/tmp/other.pid")
+	if b.ownsProcess(foreign.Process.Pid) {
+		t.Fatal("чужой qemu принят за VM инстанса")
+	}
+
+	ours := fakeQemu(t, "-drive", "file="+b.diskPath()+",if=virtio,format=qcow2", "-pidfile", b.pidPath())
+	if !b.ownsProcess(ours.Process.Pid) {
+		t.Fatal("qemu инстанса не опознан")
+	}
+}
+
+// Таймаут загрузки не должен превращаться в «запуск прерван остановкой»:
+// очистка после неудачной загрузки не отменяет контекст Start.
+func TestFailBootKeepsStartContext(t *testing.T) {
+	b := testBackend(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b.cancelStart = cancel
+
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan struct{})
+	b.proc, b.exited = cmd.Process, exited
+	go func() {
+		cmd.Wait()
+		b.processExited(cmd.Process, exited)
+	}()
+
+	b.failBoot(cmd.Process, exited)
+	if ctx.Err() != nil {
+		t.Fatal("failBoot отменил контекст Start")
+	}
+	select {
+	case <-exited:
+	default:
+		t.Fatal("VM не остановлена")
 	}
 }
