@@ -48,6 +48,15 @@ type Backend interface {
 	Exec(ctx context.Context, cmd ...string) ([]byte, error)
 }
 
+// Porter — бэкенд, чья гостевая ОС доступна с хоста по IP напрямую
+// (darwin-vz через vmnet). Позволяет демону пробрасывать TCP-порты
+// контейнеров на localhost в userspace, без hostfwd гипервизора.
+type Porter interface {
+	Backend
+	// GuestIP возвращает текущий IP гостевой ОС, маршрутизируемый с хоста.
+	GuestIP() (string, error)
+}
+
 // Driver — фабрика бэкенда.
 type Driver func() Backend
 

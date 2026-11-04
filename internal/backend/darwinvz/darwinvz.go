@@ -386,9 +386,10 @@ func (b *Backend) Status(ctx context.Context) (backend.Status, error) {
 	return st, nil
 }
 
-// GuestSocket подключается к dockerd напрямую по IP гостя:
-// vmnet NAT даёт маршрутизируемый с хоста адрес, hostfwd не нужен.
-func (b *Backend) GuestSocket(ctx context.Context) (net.Conn, error) {
+// GuestIP возвращает текущий IP гостевой ОС: vmnet NAT даёт
+// маршрутизируемый с хоста адрес, поэтому порты гостя доступны напрямую.
+// Реализует backend.Porter — используется форвардером портов.
+func (b *Backend) GuestIP() (string, error) {
 	b.mu.Lock()
 	ip := b.guestIP
 	b.mu.Unlock()
@@ -398,7 +399,17 @@ func (b *Backend) GuestSocket(ctx context.Context) (net.Conn, error) {
 		}
 	}
 	if ip == "" {
-		return nil, errors.New("VM не запущена или IP гостя неизвестен")
+		return "", errors.New("VM не запущена или IP гостя неизвестен")
+	}
+	return ip, nil
+}
+
+// GuestSocket подключается к dockerd напрямую по IP гостя,
+// hostfwd не нужен.
+func (b *Backend) GuestSocket(ctx context.Context) (net.Conn, error) {
+	ip, err := b.GuestIP()
+	if err != nil {
+		return nil, err
 	}
 	var d net.Dialer
 	return d.DialContext(ctx, "tcp", net.JoinHostPort(ip, strconv.Itoa(b.cfg.DockerPort)))

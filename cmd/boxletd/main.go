@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/alexandr-mironov/boxlet/internal/backend"
 	_ "github.com/alexandr-mironov/boxlet/internal/backend/darwinvz"
@@ -34,9 +35,13 @@ type daemon struct {
 	be     backend.Backend
 	px     *proxy.Proxy
 
-	startMu     sync.Mutex
-	starting    bool
-	startErr    error
+	startMu  sync.Mutex
+	starting bool
+	startErr error
+
+	fwdMu     sync.Mutex
+	fwd       *proxy.PortForwarder
+	fwdCancel context.CancelFunc
 }
 
 func main() {
@@ -106,6 +111,7 @@ func run() error {
 
 	log.Printf("boxletd: остановка…")
 	srv.Close()
+	d.stopPortForwarding()
 	d.px.Stop()
 	return d.be.Stop(context.Background())
 }
@@ -143,7 +149,90 @@ func (d *daemon) startBackend(ctx context.Context) {
 		return
 	}
 	d.postStart(ctx)
+	d.startPortForwarding()
 	log.Printf("boxletd: движок готов")
+}
+
+// startPortForwarding поднимает userspace-проброс портов на localhost,
+// если бэкенд даёт прямой доступ к IP гостя (backend.Porter, darwin-vz).
+// На qemu-бэкенде проброс делает сам qemu через hostfwd.
+func (d *daemon) startPortForwarding() {
+	p, ok := d.be.(backend.Porter)
+	if !ok {
+		return
+	}
+	d.fwdMu.Lock()
+	defer d.fwdMu.Unlock()
+	if d.fwdCancel != nil {
+		return // уже запущен
+	}
+	fwd := proxy.NewPortForwarder(p.GuestIP)
+	ctx, cancel := context.WithCancel(context.Background())
+	d.fwd = fwd
+	d.fwdCancel = cancel
+	go d.portForwardLoop(ctx, fwd)
+}
+
+func (d *daemon) stopPortForwarding() {
+	d.fwdMu.Lock()
+	defer d.fwdMu.Unlock()
+	if d.fwdCancel == nil {
+		return
+	}
+	d.fwdCancel()
+	d.fwdCancel = nil
+	d.fwd = nil
+}
+
+// portForwardLoop следит за портами, которые нужно пробросить:
+// статический список из конфига + порты, опубликованные запущенными
+// контейнерами (опрос dockerd раз в 2 секунды; событийная модель
+// по /events хрупче при перезапусках dockerd).
+func (d *daemon) portForwardLoop(ctx context.Context, fwd *proxy.PortForwarder) {
+	d.reconcilePorts(ctx, fwd)
+	tick := time.NewTicker(2 * time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			fwd.Close()
+			return
+		case <-tick.C:
+			d.reconcilePorts(ctx, fwd)
+		}
+	}
+}
+
+func (d *daemon) reconcilePorts(ctx context.Context, fwd *proxy.PortForwarder) {
+	ports, err := proxy.ParsePortSpecs(d.cfg.ForwardedPorts)
+	if err != nil {
+		log.Printf("boxletd: конфиг forwarded_ports: %v", err)
+		ports = map[int]int{}
+	}
+
+	// dockerd публикует порты контейнеров на 0.0.0.0 гостевой ОС;
+	// пробрасываем каждый такой TCP-порт на 127.0.0.1 хоста.
+	data, err := d.dockerAPI(ctx, http.MethodGet, "/containers/json", nil)
+	if err == nil {
+		var containers []struct {
+			Ports []struct {
+				PublicPort  int    `json:"PublicPort"`
+				Type        string `json:"Type"`
+			} `json:"Ports"`
+		}
+		if json.Unmarshal(data, &containers) == nil {
+			for _, c := range containers {
+				for _, p := range c.Ports {
+					if p.Type == "tcp" && p.PublicPort > 0 {
+						if _, ok := ports[p.PublicPort]; !ok {
+							ports[p.PublicPort] = p.PublicPort
+						}
+					}
+				}
+			}
+		}
+	}
+	fwd.SetPorts(ports)
 }
 
 // startError возвращает ошибку последней попытки запуска, если была.
@@ -251,6 +340,7 @@ func (d *daemon) handleStop(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
 	}
+	d.stopPortForwarding()
 	d.px.Stop()
 	if err := d.be.Stop(r.Context()); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
