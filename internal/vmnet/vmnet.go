@@ -46,6 +46,11 @@ func LookupLease(mac string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return parseLeases(data, mac), nil
+}
+
+// parseLeases разбирает содержимое dhcpd_leases. Вынесено для тестов.
+func parseLeases(data []byte, mac string) string {
 	want := normMAC(mac)
 	for _, block := range leaseBlockRe.FindAllSubmatch(data, -1) {
 		hw := leaseHWRe.FindSubmatch(block[1])
@@ -54,10 +59,10 @@ func LookupLease(mac string) (string, error) {
 			continue
 		}
 		if normMAC(string(hw[1])) == want {
-			return string(ip[1]), nil
+			return string(ip[1])
 		}
 	}
-	return "", nil
+	return ""
 }
 
 // normMAC приводит MAC к 12 шестнадцатеричным цифрам без разделителей.

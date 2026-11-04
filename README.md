@@ -67,13 +67,15 @@ docker ps
 
 ## Структура репозитория
 
-- `cmd/boxlet` — CLI (init/start/stop/status/doctor/shell/set/service/upgrade/ps/...)
-- `cmd/boxletd` — демон: управляет VM, сокет-прокси, веб-интерфейсом
+- `cmd/boxlet` — CLI (init/start/stop/status/doctor/shell/logs/dns/set/service/upgrade/ps/...)
+- `cmd/boxletd` — демон: управляет VM, сокет-прокси, DNS и веб-интерфейсом
 - `cmd/boxlet-agent` — агент в гостевой ОС для `boxlet shell` (linux, static)
-- `cmd/boxlet-priv` — setuid-хелпер: порты <1024, symlink /var/run/docker.sock
+- `cmd/boxlet-priv` — setuid-хелпер: порты <1024, symlink /var/run/docker.sock,
+  /etc/resolver/boxlet
 - `internal/backend` — интерфейс драйвера + реализации per-платформа
 - `internal/guest` — гостевая ОС: скачивание Alpine, apkovl-оверлей
 - `internal/proxy` — проксирование Docker API сокета из VM на хост
+- `internal/dnsd` — DNS-сервер зоны *.boxlet.local → адрес гостевой ОС
 - `internal/config`, `internal/paths` — конфигурация и пути инстанса
 - `internal/webui` — встроенный веб-интерфейс (GUI MVP)
 - `vmhelper/` — Swift-хелпер `boxlet-vm` (Virtualization.framework)

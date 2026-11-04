@@ -140,8 +140,9 @@ type tarFile struct {
 // Alpine: сеть, репозитории, автозапуск сервиса local с bootstrap-скриптом.
 // mounts — каталоги хоста для virtiofs-шар (darwin-vz); rosetta — включить
 // эмуляцию linux/amd64 через Rosetta; agent — статический бинарь
-// гостевого агента (boxlet shell), nil — shell будет недоступен.
-func BuildApkovl(mirror, release string, mounts []string, rosetta bool, agent []byte) ([]byte, error) {
+// гостевого агента (boxlet shell), nil — shell будет недоступен;
+// token — токен аутентификации агента (см. AgentToken).
+func BuildApkovl(mirror, release string, mounts []string, rosetta bool, agent []byte, token string) ([]byte, error) {
 	repositories := fmt.Sprintf("%s/%s/main\n%s/%s/community\n", mirror, release, mirror, release)
 
 	// Секция шар хоста и Rosetta для bootstrap-скрипта.
@@ -178,6 +179,8 @@ func BuildApkovl(mirror, release string, mounts []string, rosetta bool, agent []
 		files = append(files,
 			tarFile{name: "usr/local/bin/", mode: 0o755},
 			tarFile{name: "usr/local/bin/boxlet-agent", body: agent, mode: 0o755},
+			// Токен агента: только root гостевой ОС.
+			tarFile{name: "etc/boxlet-agent.token", body: []byte(token), mode: 0o600},
 		)
 	}
 

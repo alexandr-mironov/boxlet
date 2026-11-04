@@ -171,7 +171,12 @@ func (b *Backend) Start(ctx context.Context) error {
 		b.setState("error", err.Error())
 		return err
 	}
-	apkovl, err := guest.BuildApkovl(b.cfg.AlpineMirror, b.cfg.AlpineRelease, b.cfg.Mounts, b.cfg.Rosetta, agent)
+	token, err := guest.AgentToken(b.layout.Root)
+	if err != nil {
+		b.setState("error", err.Error())
+		return err
+	}
+	apkovl, err := guest.BuildApkovl(b.cfg.AlpineMirror, b.cfg.AlpineRelease, b.cfg.Mounts, b.cfg.Rosetta, agent, token)
 	if err != nil {
 		b.setState("error", err.Error())
 		return err
@@ -434,7 +439,11 @@ func (b *Backend) Exec(ctx context.Context, cmd ...string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return backend.AgentExec(ctx, addr, cmd)
+	token, err := guest.AgentToken(b.layout.Root)
+	if err != nil {
+		return nil, err
+	}
+	return backend.AgentExec(ctx, addr, token, cmd)
 }
 
 // running сообщает, жив ли helper-процесс.

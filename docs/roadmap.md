@@ -42,6 +42,17 @@
 - [x] `boxlet service install` — автозапуск boxletd (LaunchAgent, macOS)
 - [x] `boxlet upgrade` — перекат гостевой ОС на свежий Alpine
       (диск данных сохраняется)
+- [x] токен-аутентификация гостевого агента (генерируется на хосте,
+      едет в apkovl с правами 0600; constant-time сравнение)
+- [x] `boxlet logs` — логи демона, VM, хелпера, dockerd и агента
+      (локальные файлы + хвосты из гостя, -f для слежения)
+- [x] live-метрики гостя в `boxlet status` (load average, RAM)
+- [x] версия из git (ldflags, `boxlet version`)
+- [x] unit-тесты (vmnet leases, zboot-распаковка, apkovl, порты, DNS)
+      + CI на GitHub Actions (macos-latest: vet, тесты, make build)
+- [x] DNS-зона `*.boxlet.local` → адрес гостевой ОС: сервер в boxletd
+      (127.0.0.1:15353), активация через /etc/resolver/boxlet
+      (`boxlet dns install`)
 - [ ] vsock-канал вместо TCP для прокси сокета и агента
 - [ ] pty в boxlet shell (сейчас строчный режим без pty)
 

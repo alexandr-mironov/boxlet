@@ -9,6 +9,8 @@
 //	                                      и проксировать их в гостевую ОС
 //	boxlet-priv link                      создать /var/run/docker.sock →
 //	                                      сокет boxlet
+//	boxlet-priv resolver install|uninstall   (у)становить /etc/resolver/boxlet
+//	                                      — зона boxlet.local → DNS boxletd
 //
 // Меры безопасности:
 //   - набор операций фиксирован, произвольные команды не выполняются;
@@ -16,7 +18,9 @@
 //     явно и перезапускает хелпер при его изменении; после bind
 //     привилегии сбрасываются (setuid обратно к реальному пользователю);
 //   - link: цель симлинка жёстко фиксирована —
-//     <домашний каталог реального пользователя>/.boxlet/run/docker.sock.
+//     <домашний каталог реального пользователя>/.boxlet/run/docker.sock;
+//   - resolver: путь и содержимое файла жёстко фиксированы,
+//     произвольные файлы записать нельзя.
 package main
 
 import (
@@ -29,6 +33,7 @@ import (
 	"syscall"
 
 	"github.com/alexandr-mironov/boxlet/internal/config"
+	"github.com/alexandr-mironov/boxlet/internal/dnsd"
 	"github.com/alexandr-mironov/boxlet/internal/proxy"
 	"github.com/alexandr-mironov/boxlet/internal/vmnet"
 )
@@ -47,6 +52,8 @@ func main() {
 		err = cmdForward(os.Args[2:])
 	case "link":
 		err = cmdLink()
+	case "resolver":
+		err = cmdResolver(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "неизвестная операция: %s\n", os.Args[1])
 		os.Exit(2)
@@ -162,4 +169,36 @@ func cmdLink() error {
 	}
 	log.Printf("%s → %s", dockerSockDst, target)
 	return nil
+}
+
+// resolverFile — конфиг macOS-резолвера зоны boxlet.local: запросы этой
+// зоны идут на DNS-сервер boxletd (127.0.0.1, нестандартный порт).
+// Путь и содержимое фиксированы — хелпер не умеет писать ничего другого.
+const resolverFile = "/etc/resolver/boxlet"
+
+var resolverContent = fmt.Sprintf("nameserver 127.0.0.1\nport %d\n", dnsd.Port)
+
+func cmdResolver(args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("использование: boxlet-priv resolver install|uninstall")
+	}
+	switch args[0] {
+	case "install":
+		if err := os.MkdirAll("/etc/resolver", 0o755); err != nil {
+			return fmt.Errorf("mkdir /etc/resolver: %w", err)
+		}
+		if err := os.WriteFile(resolverFile, []byte(resolverContent), 0o644); err != nil {
+			return fmt.Errorf("запись %s: %w", resolverFile, err)
+		}
+		log.Printf("%s установлен: зона %s → 127.0.0.1:%d", resolverFile, dnsd.Zone, dnsd.Port)
+		return nil
+	case "uninstall":
+		if err := os.Remove(resolverFile); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("удаление %s: %w", resolverFile, err)
+		}
+		log.Printf("%s удалён", resolverFile)
+		return nil
+	default:
+		return fmt.Errorf("неизвестное действие: %s", args[0])
+	}
 }

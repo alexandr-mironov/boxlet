@@ -129,7 +129,12 @@ func (b *Backend) Start(ctx context.Context) error {
 	// qemu-бэкенд: без virtiofs-шар хоста (нужен virtiofsd — в roadmap)
 	// и без Rosetta (это привилегия darwin-vz).
 	agent, _ := guest.AgentBinary(runtime.GOARCH)
-	apkovl, err := guest.BuildApkovl(b.cfg.AlpineMirror, b.cfg.AlpineRelease, nil, false, agent)
+	token, err := guest.AgentToken(b.layout.Root)
+	if err != nil {
+		b.setState("error", err.Error())
+		return err
+	}
+	apkovl, err := guest.BuildApkovl(b.cfg.AlpineMirror, b.cfg.AlpineRelease, nil, false, agent, token)
 	if err != nil {
 		b.setState("error", err.Error())
 		return err
@@ -380,7 +385,11 @@ func (b *Backend) Exec(ctx context.Context, cmd ...string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return backend.AgentExec(ctx, addr, cmd)
+	token, err := guest.AgentToken(b.layout.Root)
+	if err != nil {
+		return nil, err
+	}
+	return backend.AgentExec(ctx, addr, token, cmd)
 }
 
 // running сообщает, жив ли процесс qemu.

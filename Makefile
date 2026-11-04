@@ -1,4 +1,5 @@
 BIN := bin
+VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
 .PHONY: build clean run vet tidy vm-helper
 
@@ -6,7 +7,7 @@ build:
 	mkdir -p $(BIN)
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o $(BIN)/boxlet-agent-linux-arm64 ./cmd/boxlet-agent
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o $(BIN)/boxlet-agent-linux-amd64 ./cmd/boxlet-agent
-	go build -o $(BIN)/boxlet ./cmd/boxlet
+	go build -ldflags "-X main.version=$(VERSION)" -o $(BIN)/boxlet ./cmd/boxlet
 	go build -o $(BIN)/boxletd ./cmd/boxletd
 ifeq ($(shell uname -s),Darwin)
 	$(MAKE) vm-helper

@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    name: macOS build & test
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+
+      - name: gofmt check
+        run: |
+          test -z "$(gofmt -l cmd internal)" || { gofmt -l cmd internal; exit 1; }
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Unit tests
+        run: go test ./...
+
+      - name: Full build (boxlet, boxletd, boxlet-vm, boxlet-priv, agents)
+        run: make build
+
+      - name: Smoke
+        run: |
+          ./bin/boxlet version
+          ./bin/boxlet --help

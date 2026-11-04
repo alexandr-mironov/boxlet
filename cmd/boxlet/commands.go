@@ -19,6 +19,7 @@ import (
 	_ "github.com/alexandr-mironov/boxlet/internal/backend/linux"
 	_ "github.com/alexandr-mironov/boxlet/internal/backend/qemu"
 	"github.com/alexandr-mironov/boxlet/internal/config"
+	"github.com/alexandr-mironov/boxlet/internal/guest"
 	"github.com/alexandr-mironov/boxlet/internal/paths"
 )
 
@@ -206,7 +207,47 @@ func cmdStatus(args []string) error {
 			fmt.Printf("данные:  %s занято на диске\n", humanBytes(used))
 		}
 	}
+	printGuestLoad()
 	return nil
+}
+
+// printGuestLoad показывает live-нагрузку гостевой ОС (load average
+// и память), если агент доступен. Молча пропускает при недоступности.
+func printGuestLoad() {
+	addr, token, err := agentCredentials()
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := backend.AgentExec(ctx, addr, token,
+		[]string{"sh", "-c", "cat /proc/loadavg; grep -E 'MemTotal|MemAvailable' /proc/meminfo"})
+	if err != nil {
+		return
+	}
+	var load string
+	var memTotal, memAvail int64
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 3 && strings.Count(fields[0], ".") == 1 && load == "" {
+			load = strings.Join(fields[:3], " ")
+		}
+		if len(fields) >= 2 {
+			switch fields[0] {
+			case "MemTotal:":
+				fmt.Sscan(fields[1], &memTotal)
+			case "MemAvailable:":
+				fmt.Sscan(fields[1], &memAvail)
+			}
+		}
+	}
+	if load != "" {
+		fmt.Printf("нагрузка VM: load %s", load)
+		if memTotal > 0 {
+			fmt.Printf(", RAM %d/%d MiB занято", (memTotal-memAvail)/1024, memTotal/1024)
+		}
+		fmt.Println()
+	}
 }
 
 func humanBytes(n int64) string {
@@ -252,8 +293,16 @@ func cmdShell(args []string) error {
 		return fmt.Errorf("агент гостевой ОС недоступен (%s): %w", st.AgentAddr, err)
 	}
 	defer conn.Close()
-	// Первая строка — argv через \x00; пустая строка = sh.
-	if _, err := fmt.Fprintf(conn, "%s\n", strings.Join(args, "\x00")); err != nil {
+	root, err := config.Dir()
+	if err != nil {
+		return err
+	}
+	token, err := guest.AgentToken(root)
+	if err != nil {
+		return err
+	}
+	// Первая строка — токен, вторая — argv через \x00 (пустая = sh).
+	if _, err := fmt.Fprintf(conn, "%s\n%s\n", token, strings.Join(args, "\x00")); err != nil {
 		return err
 	}
 

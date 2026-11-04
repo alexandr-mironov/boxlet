@@ -96,14 +96,14 @@ func Available() []string {
 // AgentExec выполняет команду в гостевой ОС через boxlet-agent
 // (одно соединение = одна команда; протокол см. cmd/boxlet-agent).
 // Используется реализациями Backend.Exec.
-func AgentExec(ctx context.Context, addr string, argv []string) ([]byte, error) {
+func AgentExec(ctx context.Context, addr, token string, argv []string) ([]byte, error) {
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("агент гостевой ОС недоступен (%s): %w", addr, err)
 	}
 	defer conn.Close()
-	if _, err := fmt.Fprintf(conn, "%s\n", strings.Join(argv, "\x00")); err != nil {
+	if _, err := fmt.Fprintf(conn, "%s\n%s\n", token, strings.Join(argv, "\x00")); err != nil {
 		return nil, err
 	}
 	// stdin команды не нужен — закрываем запись, чтобы команда увидела EOF.

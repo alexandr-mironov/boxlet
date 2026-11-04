@@ -26,6 +26,7 @@ import (
 	_ "github.com/alexandr-mironov/boxlet/internal/backend/linux"
 	_ "github.com/alexandr-mironov/boxlet/internal/backend/qemu"
 	"github.com/alexandr-mironov/boxlet/internal/config"
+	"github.com/alexandr-mironov/boxlet/internal/dnsd"
 	"github.com/alexandr-mironov/boxlet/internal/paths"
 	"github.com/alexandr-mironov/boxlet/internal/privhelper"
 	"github.com/alexandr-mironov/boxlet/internal/proxy"
@@ -45,6 +46,7 @@ type daemon struct {
 	fwdMu     sync.Mutex
 	fwd       *proxy.PortForwarder
 	fwdCancel context.CancelFunc
+	dnsCancel context.CancelFunc
 	privCmd   *exec.Cmd // boxlet-priv: порты <1024
 	privKey   string    // текущий делегированный список портов
 }
@@ -161,6 +163,7 @@ func (d *daemon) startBackend(ctx context.Context) {
 	}
 	d.postStart(ctx)
 	d.startPortForwarding()
+	d.startDNS()
 	log.Printf("boxletd: движок готов")
 }
 
@@ -184,9 +187,36 @@ func (d *daemon) startPortForwarding() {
 	go d.portForwardLoop(ctx, fwd)
 }
 
+// startDNS поднимает DNS-сервер зоны boxlet.local (dnsd), отвечающий
+// адресом гостевой ОС. Зона активируется файлом /etc/resolver/boxlet
+// (boxlet dns install); без него сервер просто никому не нужен.
+// На qemu-бэкенде IP гостя с хоста не маршрутизируется — DNS бессмыслен.
+func (d *daemon) startDNS() {
+	p, ok := d.be.(backend.Porter)
+	if !ok {
+		return
+	}
+	d.fwdMu.Lock()
+	defer d.fwdMu.Unlock()
+	if d.dnsCancel != nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	d.dnsCancel = cancel
+	go func() {
+		if err := dnsd.New(p.GuestIP).Run(ctx); err != nil {
+			log.Printf("boxletd: dns: %v", err)
+		}
+	}()
+}
+
 func (d *daemon) stopPortForwarding() {
 	d.fwdMu.Lock()
 	defer d.fwdMu.Unlock()
+	if d.dnsCancel != nil {
+		d.dnsCancel()
+		d.dnsCancel = nil
+	}
 	if d.privCmd != nil && d.privCmd.Process != nil {
 		d.privCmd.Process.Signal(syscall.SIGTERM)
 		d.privCmd.Wait()

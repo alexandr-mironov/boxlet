@@ -14,18 +14,32 @@ package main
 
 import (
 	"bufio"
+	"crypto/subtle"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"os"
 	"os/exec"
 	"strings"
 )
 
 const addr = ":2376"
 
+// tokenFile — токен кладётся в гостевую ОС через apkovl.
+const tokenFile = "/etc/boxlet-agent.token"
+
+// token — загружается при старте; пустой токен (файла нет) отключает
+// аутентификацию: такое бывает только в VM, собранной без apkovl boxlet.
+var token string
+
 func main() {
 	log.SetPrefix("boxlet-agent: ")
+	if data, err := os.ReadFile(tokenFile); err == nil {
+		token = strings.TrimSpace(string(data))
+	} else {
+		log.Printf("внимание: %s не найден, аутентификация отключена", tokenFile)
+	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		log.Fatal(err)
@@ -43,6 +57,17 @@ func main() {
 func handle(conn net.Conn) {
 	defer conn.Close()
 	br := bufio.NewReader(conn)
+	// Первая строка — токен аутентификации.
+	auth, err := br.ReadString('\n')
+	if err != nil {
+		return
+	}
+	if token != "" && subtle.ConstantTimeCompare(
+		[]byte(strings.TrimRight(auth, "\r\n")), []byte(token)) != 1 {
+		fmt.Fprint(conn, "boxlet-agent: неверный токен\n")
+		return
+	}
+	// Вторая строка — argv через \x00; пустая → sh.
 	line, err := br.ReadBytes('\n')
 	if err != nil {
 		return
