@@ -12,8 +12,9 @@ build:
 ifeq ($(shell uname -s),Darwin)
 	$(MAKE) vm-helper
 	go build -o $(BIN)/boxlet-priv ./cmd/boxlet-priv
+	swiftc -O -o $(BIN)/boxlet-tray tray/boxlet-tray.swift -framework Cocoa
 endif
-	@echo "готово: $(BIN)/boxlet, $(BIN)/boxletd$(if $(filter Darwin,$(shell uname -s)), $(BIN)/boxlet-vm, $(BIN)/boxlet-priv,)"
+	@echo "готово: $(BIN)/boxlet, $(BIN)/boxletd$(if $(filter Darwin,$(shell uname -s)), $(BIN)/boxlet-vm, $(BIN)/boxlet-priv, $(BIN)/boxlet-tray,)"
 
 # vm-helper собирает Swift-хелпер boxlet-vm (Virtualization.framework)
 # и подписывает его ad-hoc с entitlement на виртуализацию.

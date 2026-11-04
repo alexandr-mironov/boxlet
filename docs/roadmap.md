@@ -66,8 +66,10 @@
 
 ## M4 — GUI
 
+- [x] менюбар-трей macOS (`boxlet tray`, tray/boxlet-tray.swift на AppKit):
+      статус движка, live-метрики, start/stop/restart, запуск демона,
+      переход в веб-интерфейс; синглтон по pid-файлу
 - [ ] desktop-приложение поверх API демона
-- [ ] менюбар-трей: статус, start/stop, расход ресурсов
 
 ## M5 — миграция с Docker Desktop / OrbStack
 

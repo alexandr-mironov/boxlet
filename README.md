@@ -67,7 +67,7 @@ docker ps
 
 ## Структура репозитория
 
-- `cmd/boxlet` — CLI (init/start/stop/status/doctor/shell/logs/dns/set/service/upgrade/ps/...)
+- `cmd/boxlet` — CLI (init/start/stop/status/doctor/shell/logs/dns/tray/set/service/upgrade/ps/...)
 - `cmd/boxletd` — демон: управляет VM, сокет-прокси, DNS и веб-интерфейсом
 - `cmd/boxlet-agent` — агент в гостевой ОС для `boxlet shell` (linux, static)
 - `cmd/boxlet-priv` — setuid-хелпер: порты <1024, symlink /var/run/docker.sock,
@@ -80,6 +80,7 @@ docker ps
 - `internal/webui` — встроенный веб-интерфейс (GUI MVP)
 - `vmhelper/` — Swift-хелпер `boxlet-vm` (Virtualization.framework)
   и entitlements для ad-hoc подписи
+- `tray/` — менюбар-трей macOS `boxlet-tray` (AppKit, без зависимостей)
 - `docs/` — архитектура, роадмап, заметки по совместимости
 
 ## Документация

@@ -47,6 +47,8 @@ func main() {
 		err = cmdLogs(os.Args[2:])
 	case "dns":
 		err = cmdDNS(os.Args[2:])
+	case "tray":
+		err = cmdTray(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Printf("boxlet %s\n", version)
 	case "help", "--help", "-h":
@@ -80,6 +82,7 @@ func usage() {
   boxlet upgrade   обновить гостевую ОС (свежий Alpine; данные сохраняются)
   boxlet logs [daemon|vm|helper|dockerd|agent] [-f]   логи движка и гостевой ОС
   boxlet dns install|uninstall|status   имена *.boxlet.local для гостевой ОС (macOS)
+  boxlet tray      иконка в менюбаре macOS (статус, метрики, start/stop/restart)
   boxlet priv install   установить privileged helper (порты <1024, /var/run/docker.sock)
   boxlet version   версия
 
