@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/alexandr-mironov/boxlet/internal/backend"
@@ -192,12 +194,79 @@ func cmdStatus(args []string) error {
 	}
 	fmt.Printf("бэкенд:  %v\nсостояние: %v (%v)\nсокет:   %v\n",
 		st["backend"], st["state"], st["detail"], st["socket"])
+
+	// Ресурсы из конфига + фактический расход диска данных.
+	if cfg, err := config.Load(); err == nil {
+		fmt.Printf("ресурсы: %d CPU, %d MiB RAM, диск %d GiB\n",
+			cfg.CPUs, cfg.MemoryMiB, cfg.DiskGiB)
+	}
+	root, err := config.Dir()
+	if err == nil {
+		if used, err := dirDiskUsage(filepath.Join(root, "data")); err == nil {
+			fmt.Printf("данные:  %s занято на диске\n", humanBytes(used))
+		}
+	}
 	return nil
 }
 
-// cmdShell открывает shell внутри VM бэкенда.
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for x := n / unit; x >= unit; x /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGT"[exp])
+}
+
+// cmdShell открывает shell в гостевой ОС через boxlet-agent:
+// без аргументов — интерактивный sh (строчный режим, без pty),
+// с аргументами — выполнить команду и показать вывод.
 func cmdShell(args []string) error {
-	return fmt.Errorf("появится вместе с первым работающим бэкендом (M1)")
+	base, err := daemonURL()
+	if err != nil {
+		return err
+	}
+	resp, err := http.Get(base + "/api/status")
+	if err != nil {
+		return fmt.Errorf("демон недоступен: %w (boxlet start)", err)
+	}
+	var st struct {
+		Running   bool   `json:"running"`
+		AgentAddr string `json:"agent_addr"`
+	}
+	json.NewDecoder(resp.Body).Decode(&st)
+	resp.Body.Close()
+	if st.AgentAddr == "" {
+		if !st.Running {
+			return fmt.Errorf("движок не запущен: boxlet start")
+		}
+		return fmt.Errorf("гостевой агент недоступен: VM старая (агент появился позже) — перезапустите: boxlet stop && boxlet start")
+	}
+
+	conn, err := net.Dial("tcp", st.AgentAddr)
+	if err != nil {
+		return fmt.Errorf("агент гостевой ОС недоступен (%s): %w", st.AgentAddr, err)
+	}
+	defer conn.Close()
+	// Первая строка — argv через \x00; пустая строка = sh.
+	if _, err := fmt.Fprintf(conn, "%s\n", strings.Join(args, "\x00")); err != nil {
+		return err
+	}
+
+	// stdin → агент; по EOF (Ctrl-D) полузакрываем запись.
+	go func() {
+		io.Copy(conn, os.Stdin)
+		if tc, ok := conn.(*net.TCPConn); ok {
+			tc.CloseWrite()
+		}
+	}()
+	// агент → stdout; команда завершилась — соединение закроется.
+	io.Copy(os.Stdout, conn)
+	return nil
 }
 
 // cmdDockerPassthrough пробрасывает команду в docker CLI хоста,

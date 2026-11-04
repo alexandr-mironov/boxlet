@@ -5,12 +5,12 @@ import "path/filepath"
 
 // Layout — стандартные пути внутри ~/.boxlet.
 type Layout struct {
-	Root        string
-	DockerSock  string
-	DaemonSock  string
-	ImagesDir   string
-	DataDir     string
-	LogsDir     string
+	Root       string
+	DockerSock string
+	DaemonSock string
+	ImagesDir  string
+	DataDir    string
+	LogsDir    string
 }
 
 // New строит раскладку путей от корня инстанса.

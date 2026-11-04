@@ -44,6 +44,7 @@ type Backend struct {
 	mu      sync.Mutex
 	status  backend.Status
 	cmd     *exec.Cmd
+	adopted bool // VM запущена прошлым экземпляром демона, мы её подхватили
 	guestIP string
 }
 
@@ -130,8 +131,32 @@ func (b *Backend) ensureMAC() error {
 func (b *Backend) Start(ctx context.Context) error {
 	b.mu.Lock()
 	if b.running() {
+		if b.cmd != nil {
+			b.mu.Unlock()
+			return errors.New("уже запущен")
+		}
+		// VM осталась от прошлого экземпляра демона (перезапуск/крэш
+		// boxletd): не падаем с «уже запущен», а подхватываем её —
+		// образы и контейнеры пользователя на месте, гасить незачем.
+		b.adopted = true
+		b.setStateLocked("starting", "подхватываю уже запущенную VM")
 		b.mu.Unlock()
-		return errors.New("уже запущен")
+
+		ip, err := b.waitGuestIP(ctx, 5*time.Minute)
+		if err != nil {
+			b.setState("error", err.Error())
+			return fmt.Errorf("IP гостевой ОС: %w", err)
+		}
+		b.mu.Lock()
+		b.guestIP = ip
+		b.mu.Unlock()
+		if err := waitDocker(ctx, net.JoinHostPort(ip, strconv.Itoa(b.cfg.DockerPort)), bootTimeout); err != nil {
+			b.setState("error", err.Error())
+			return fmt.Errorf("dockerd не поднялся: %w (см. %s)", err, b.serialLog())
+		}
+		b.setState("running", fmt.Sprintf("dockerd готов (%s:%d, VM подхвачена)", ip, b.cfg.DockerPort))
+		go b.watchAdopted()
+		return nil
 	}
 	b.setStateLocked("starting", "подготовка гостевой ОС")
 	b.mu.Unlock()
@@ -141,7 +166,12 @@ func (b *Backend) Start(ctx context.Context) error {
 		return err
 	}
 
-	apkovl, err := guest.BuildApkovl(b.cfg.AlpineMirror, b.cfg.AlpineRelease, b.cfg.Mounts, b.cfg.Rosetta)
+	agent, err := guest.AgentBinary("arm64")
+	if err != nil {
+		b.setState("error", err.Error())
+		return err
+	}
+	apkovl, err := guest.BuildApkovl(b.cfg.AlpineMirror, b.cfg.AlpineRelease, b.cfg.Mounts, b.cfg.Rosetta, agent)
 	if err != nil {
 		b.setState("error", err.Error())
 		return err
@@ -302,13 +332,22 @@ func waitDocker(ctx context.Context, addr string, timeout time.Duration) error {
 
 func (b *Backend) Stop(ctx context.Context) error {
 	b.mu.Lock()
-	if b.cmd == nil || b.cmd.Process == nil {
+	var proc *os.Process
+	switch {
+	case b.cmd != nil && b.cmd.Process != nil:
+		proc = b.cmd.Process
+	case b.adopted:
+		// VM подхвачена по pid-файлу: останавливаем чужой процесс.
+		if pid, err := b.helperPID(); err == nil {
+			proc, _ = os.FindProcess(pid)
+		}
+	}
+	if proc == nil {
 		b.setStateLocked("stopped", "не запускался")
 		b.mu.Unlock()
 		return nil
 	}
 	b.setStateLocked("stopping", "сбрасываю данные на диск (sync)")
-	proc := b.cmd.Process
 	ip := b.guestIP
 	b.mu.Unlock()
 
@@ -323,6 +362,9 @@ func (b *Backend) Stop(ctx context.Context) error {
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		if err := proc.Signal(syscall.Signal(0)); err != nil {
+			b.mu.Lock()
+			b.adopted = false
+			b.mu.Unlock()
 			b.setState("stopped", "остановлен")
 			return nil
 		}
@@ -333,6 +375,9 @@ func (b *Backend) Stop(ctx context.Context) error {
 		}
 	}
 	proc.Signal(syscall.SIGKILL)
+	b.mu.Lock()
+	b.adopted = false
+	b.mu.Unlock()
 	b.setState("stopped", "остановлен принудительно (SIGKILL)")
 	return nil
 }
@@ -374,9 +419,22 @@ func (b *Backend) GuestSocket(ctx context.Context) (net.Conn, error) {
 	return d.DialContext(ctx, "tcp", net.JoinHostPort(ip, strconv.Itoa(b.cfg.DockerPort)))
 }
 
-// Exec в M2 не поддержан; обходной путь — privileged-контейнер + nsenter.
+// AgentAddr — адрес гостевого агента (boxlet shell). Реализует backend.Sheller.
+func (b *Backend) AgentAddr() (string, error) {
+	ip, err := b.GuestIP()
+	if err != nil {
+		return "", err
+	}
+	return net.JoinHostPort(ip, strconv.Itoa(guest.AgentPort)), nil
+}
+
+// Exec выполняет команду в гостевой ОС через boxlet-agent.
 func (b *Backend) Exec(ctx context.Context, cmd ...string) ([]byte, error) {
-	return nil, errors.New("shell в VM появится позже; обходной путь: docker run -it --rm --privileged --pid=host alpine nsenter -t 1 -m sh")
+	addr, err := b.AgentAddr()
+	if err != nil {
+		return nil, err
+	}
+	return backend.AgentExec(ctx, addr, cmd)
 }
 
 // running сообщает, жив ли helper-процесс.
@@ -384,19 +442,54 @@ func (b *Backend) running() bool {
 	if b.cmd != nil && b.cmd.Process != nil {
 		return b.cmd.Process.Signal(syscall.Signal(0)) == nil
 	}
+	_, err := b.helperPID()
+	return err == nil
+}
+
+// helperPID читает pid-файл и проверяет, что процесс жив и это именно
+// boxlet-vm (pid мог быть переиспользован другой программой).
+func (b *Backend) helperPID() (int, error) {
 	data, err := os.ReadFile(b.pidPath())
 	if err != nil {
-		return false
+		return 0, err
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
 	if err != nil {
-		return false
+		return 0, err
 	}
 	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
+	if err != nil || proc.Signal(syscall.Signal(0)) != nil {
+		return 0, fmt.Errorf("pid %d не жив", pid)
 	}
-	return proc.Signal(syscall.Signal(0)) == nil
+	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
+	if err != nil || !strings.Contains(string(out), "boxlet-vm") {
+		return 0, fmt.Errorf("pid %d — не boxlet-vm (%s)", pid, strings.TrimSpace(string(out)))
+	}
+	return pid, nil
+}
+
+// watchAdopted следит за подхваченной VM: cmd.Wait на неё нет
+// (процесс не наш), поэтому опрашиваем pid.
+func (b *Backend) watchAdopted() {
+	for {
+		time.Sleep(2 * time.Second)
+		b.mu.Lock()
+		if !b.adopted {
+			b.mu.Unlock()
+			return
+		}
+		b.mu.Unlock()
+		if _, err := b.helperPID(); err != nil {
+			b.mu.Lock()
+			if b.adopted {
+				b.adopted = false
+				b.guestIP = ""
+				b.setStateLocked("stopped", "boxlet-vm завершился")
+			}
+			b.mu.Unlock()
+			return
+		}
+	}
 }
 
 func (b *Backend) setState(state, detail string) {

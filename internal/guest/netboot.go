@@ -51,6 +51,5 @@ func (n *NetbootServer) ApkovlURLFor(host string) string {
 	return fmt.Sprintf("http://%s:%d/boxlet.apkovl.tar.gz", host, n.port)
 }
 
-
 // Close останавливает сервер.
 func (n *NetbootServer) Close() error { return n.srv.Close() }

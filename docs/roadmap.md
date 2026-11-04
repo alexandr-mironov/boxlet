@@ -32,8 +32,18 @@
 - [x] прозрачный проброс портов на 127.0.0.1: userspace-форвардер следит
       за публикациями контейнеров (опрос dockerd) + статический список
       `forwarded_ports`; порты <1024 — через setuid-хелпер `boxlet-priv`
-      (`boxlet priv install`)
-- [ ] vsock-канал вместо TCP для прокси сокета
+      (`boxlet priv install`), демон передаёт ему актуальный список
+      (включая публикации контейнеров) и перезапускает при изменении
+- [x] `boxlet shell`: гостевой агент boxlet-agent (:2376, едет в apkovl),
+      работает и на darwin-vz (по IP гостя), и на qemu (hostfwd)
+- [x] усыновление живой VM при перезапуске демона + синглтон boxletd
+      (второй экземпляр не стартует при занятом порте API)
+- [x] `boxlet set` (CPU/RAM/диск), расход ресурсов в `boxlet status`
+- [x] `boxlet service install` — автозапуск boxletd (LaunchAgent, macOS)
+- [x] `boxlet upgrade` — перекат гостевой ОС на свежий Alpine
+      (диск данных сохраняется)
+- [ ] vsock-канал вместо TCP для прокси сокета и агента
+- [ ] pty в boxlet shell (сейчас строчный режим без pty)
 
 ## M3 — Windows
 

@@ -5,15 +5,16 @@
 // Устанавливается setuid-root (boxlet priv install) и выполняет строго
 // две операции, недоступные обычному пользователю:
 //
-//	boxlet-priv forward   слушать порты <1024 из forwarded_ports конфига
-//	                      на 127.0.0.1 и проксировать их в гостевую ОС
-//	boxlet-priv link      создать /var/run/docker.sock → сокет boxlet
+//	boxlet-priv forward <host:guest>...   слушать порты <1024 на 127.0.0.1
+//	                                      и проксировать их в гостевую ОС
+//	boxlet-priv link                      создать /var/run/docker.sock →
+//	                                      сокет boxlet
 //
 // Меры безопасности:
 //   - набор операций фиксирован, произвольные команды не выполняются;
-//   - forward: только порты <1024, только из forwarded_ports конфига
-//     реального пользователя, не более 8 штук; после bind привилегии
-//     сбрасываются (setuid обратно к реальному пользователю);
+//   - forward: только порты <1024, не более 16; демон передаёт список
+//     явно и перезапускает хелпер при его изменении; после bind
+//     привилегии сбрасываются (setuid обратно к реальному пользователю);
 //   - link: цель симлинка жёстко фиксирована —
 //     <домашний каталог реального пользователя>/.boxlet/run/docker.sock.
 package main
@@ -36,14 +37,14 @@ const dockerSockDst = "/var/run/docker.sock"
 
 func main() {
 	log.SetPrefix("boxlet-priv: ")
-	if len(os.Args) != 2 {
-		fmt.Fprintf(os.Stderr, "использование: boxlet-priv <forward|link>\n")
+	if len(os.Args) < 2 {
+		fmt.Fprintf(os.Stderr, "использование: boxlet-priv <forward host:guest...|link>\n")
 		os.Exit(2)
 	}
 	var err error
 	switch os.Args[1] {
 	case "forward":
-		err = cmdForward()
+		err = cmdForward(os.Args[2:])
 	case "link":
 		err = cmdLink()
 	default:
@@ -65,31 +66,32 @@ func realUser() (*user.User, error) {
 	return u, nil
 }
 
-// cmdForward слушает привилегированные порты из forwarded_ports
+// cmdForward слушает привилегированные порты (аргументы host:guest)
 // и проксирует их в гостевую ОС по её текущему IP (lease vmnet).
-func cmdForward() error {
+// Список приходит от boxletd: он следит и за конфигом, и за портами,
+// опубликованными контейнерами, и перезапускает хелпер при изменениях.
+func cmdForward(specs []string) error {
+	if len(specs) == 0 {
+		log.Print("не передано ни одного порта — нечего слушать")
+		return nil
+	}
+	if len(specs) > 16 {
+		return fmt.Errorf("слишком много портов (%d > 16)", len(specs))
+	}
+	ports, err := proxy.ParsePortSpecs(specs)
+	if err != nil {
+		return err
+	}
+	for host := range ports {
+		if host >= 1024 {
+			return fmt.Errorf("порт %d непривилегированный — для него хелпер не нужен", host)
+		}
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
-	ports, err := proxy.ParsePortSpecs(cfg.ForwardedPorts)
-	if err != nil {
-		return err
-	}
-	priv := map[int]int{}
-	for host, guestPort := range ports {
-		if host < 1024 {
-			priv[host] = guestPort
-		}
-	}
-	if len(priv) == 0 {
-		log.Print("нет портов <1024 в forwarded_ports — нечего слушать")
-		return nil
-	}
-	if len(priv) > 8 {
-		return fmt.Errorf("слишком много привилегированных портов (%d > 8)", len(priv))
-	}
-
 	fwd := proxy.NewPortForwarder(func() (string, error) {
 		ip, err := vmnet.LookupLease(cfg.MAC)
 		if err != nil || ip == "" {
@@ -98,7 +100,7 @@ func cmdForward() error {
 		return ip, nil
 	})
 	// Bind происходит здесь, пока есть euid=0.
-	fwd.SetPorts(priv)
+	fwd.SetPorts(ports)
 
 	// Сбрасываем привилегии: дальше процесс работает как обычный
 	// пользователь, держа уже открытые слушатели.
@@ -120,7 +122,7 @@ func cmdForward() error {
 		log.Printf("запущен без root: bind портов <1024, скорее всего, не удался (см. выше)")
 	}
 
-	log.Printf("проксирую привилегированные порты: %v", keys(priv))
+	log.Printf("проксирую привилегированные порты: %v", keys(ports))
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig

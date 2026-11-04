@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -45,6 +46,7 @@ type daemon struct {
 	fwd       *proxy.PortForwarder
 	fwdCancel context.CancelFunc
 	privCmd   *exec.Cmd // boxlet-priv: порты <1024
+	privKey   string    // текущий делегированный список портов
 }
 
 func main() {
@@ -89,9 +91,15 @@ func run() error {
 		Addr:    fmt.Sprintf("127.0.0.1:%d", cfg.APIPort),
 		Handler: mux,
 	}
+	// Синглтон: порт API занят — значит, демон уже запущен; второй
+	// экземпляр создаст параллельную VM и рассинхрон состояния.
+	apiLn, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		return fmt.Errorf("порт %s занят — boxletd уже запущен? (%w)", srv.Addr, err)
+	}
 	go func() {
 		log.Printf("boxletd: веб-интерфейс на http://%s", srv.Addr)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := srv.Serve(apiLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("boxletd: http: %v", err)
 		}
 	}()
@@ -173,44 +181,7 @@ func (d *daemon) startPortForwarding() {
 	ctx, cancel := context.WithCancel(context.Background())
 	d.fwd = fwd
 	d.fwdCancel = cancel
-	d.privCmd = d.startPrivHelperLocked()
 	go d.portForwardLoop(ctx, fwd)
-}
-
-// startPrivHelperLocked запускает setuid-хелпер boxlet-priv, если он
-// установлен и в forwarded_ports есть порты <1024. Хелпер сам читает
-// конфиг и биндит эти порты на 127.0.0.1 с последующим сбросом прав.
-func (d *daemon) startPrivHelperLocked() *exec.Cmd {
-	ports, err := proxy.ParsePortSpecs(d.cfg.ForwardedPorts)
-	if err != nil {
-		return nil
-	}
-	needPriv := false
-	for host := range ports {
-		if host < 1024 {
-			needPriv = true
-			break
-		}
-	}
-	if !needPriv || !privhelper.Installed() {
-		return nil
-	}
-	path, err := privhelper.Path()
-	if err != nil {
-		return nil
-	}
-	cmd := exec.Command(path, "forward")
-	logFile, err := os.OpenFile(filepath.Join(d.layout.LogsDir, "boxlet-priv.log"),
-		os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err == nil {
-		cmd.Stdout, cmd.Stderr = logFile, logFile
-	}
-	if err := cmd.Start(); err != nil {
-		log.Printf("boxletd: boxlet-priv: %v", err)
-		return nil
-	}
-	log.Printf("boxletd: boxlet-priv запущен (pid %d): порты <1024 из forwarded_ports", cmd.Process.Pid)
-	return cmd
 }
 
 func (d *daemon) stopPortForwarding() {
@@ -221,6 +192,7 @@ func (d *daemon) stopPortForwarding() {
 		d.privCmd.Wait()
 		d.privCmd = nil
 	}
+	d.privKey = ""
 	if d.fwdCancel == nil {
 		return
 	}
@@ -254,15 +226,6 @@ func (d *daemon) reconcilePorts(ctx context.Context, fwd *proxy.PortForwarder) {
 		log.Printf("boxletd: конфиг forwarded_ports: %v", err)
 		ports = map[int]int{}
 	}
-	// Порты <1024 обслуживает setuid-хелпер boxlet-priv — не пытаемся
-	// слушать их в основном процессе (не сработает и засоряет лог).
-	if d.privActive() {
-		for host := range ports {
-			if host < 1024 {
-				delete(ports, host)
-			}
-		}
-	}
 
 	// dockerd публикует порты контейнеров на 0.0.0.0 гостевой ОС;
 	// пробрасываем каждый такой TCP-порт на 127.0.0.1 хоста.
@@ -270,8 +233,8 @@ func (d *daemon) reconcilePorts(ctx context.Context, fwd *proxy.PortForwarder) {
 	if err == nil {
 		var containers []struct {
 			Ports []struct {
-				PublicPort  int    `json:"PublicPort"`
-				Type        string `json:"Type"`
+				PublicPort int    `json:"PublicPort"`
+				Type       string `json:"Type"`
 			} `json:"Ports"`
 		}
 		if json.Unmarshal(data, &containers) == nil {
@@ -286,17 +249,64 @@ func (d *daemon) reconcilePorts(ctx context.Context, fwd *proxy.PortForwarder) {
 			}
 		}
 	}
+
+	// Порты <1024 биндит setuid-хелпер boxlet-priv: демон передаёт ему
+	// список и перезапускает при изменении (bind без root невозможен,
+	// а хелпер сбрасывает права сразу после bind).
+	if privhelper.Installed() {
+		priv := map[int]int{}
+		for h, g := range ports {
+			if h < 1024 {
+				priv[h] = g
+				delete(ports, h)
+			}
+		}
+		d.reconcilePriv(priv)
+	}
 	fwd.SetPorts(ports)
 }
 
-// privActive сообщает, жив ли setuid-хелпер привилегированных портов.
-func (d *daemon) privActive() bool {
+// reconcilePriv приводит набор портов, делегированных boxlet-priv,
+// к нужному: при изменении списка хелпер перезапускается.
+func (d *daemon) reconcilePriv(priv map[int]int) {
+	specs := make([]string, 0, len(priv))
+	for h, g := range priv {
+		specs = append(specs, fmt.Sprintf("%d:%d", h, g))
+	}
+	sort.Strings(specs)
+	key := strings.Join(specs, ",")
+
 	d.fwdMu.Lock()
 	defer d.fwdMu.Unlock()
-	if d.privCmd == nil || d.privCmd.Process == nil {
-		return false
+	if d.privCmd != nil && d.privCmd.Process != nil &&
+		d.privCmd.Process.Signal(syscall.Signal(0)) == nil && d.privKey == key {
+		return // актуальный хелпер уже работает
 	}
-	return d.privCmd.Process.Signal(syscall.Signal(0)) == nil
+	if d.privCmd != nil && d.privCmd.Process != nil {
+		d.privCmd.Process.Signal(syscall.SIGTERM)
+		d.privCmd.Wait()
+		d.privCmd = nil
+	}
+	d.privKey = key
+	if len(specs) == 0 {
+		return
+	}
+	path, err := privhelper.Path()
+	if err != nil {
+		return
+	}
+	args := append([]string{"forward"}, specs...)
+	cmd := exec.Command(path, args...)
+	logFile, err := os.OpenFile(filepath.Join(d.layout.LogsDir, "boxlet-priv.log"),
+		os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err == nil {
+		cmd.Stdout, cmd.Stderr = logFile, logFile
+	}
+	if err := cmd.Start(); err != nil {
+		log.Printf("boxletd: boxlet-priv: %v", err)
+		return
+	}
+	log.Printf("boxletd: boxlet-priv (pid %d): порты %s", cmd.Process.Pid, key)
 }
 
 // startError возвращает ошибку последней попытки запуска, если была.
@@ -377,7 +387,7 @@ func (d *daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if err := d.lastStartError(); err != nil {
 		startErr = err.Error()
 	}
-	writeJSON(w, map[string]any{
+	out := map[string]any{
 		"backend":   d.cfg.Backend,
 		"running":   st.Running,
 		"state":     st.State,
@@ -385,7 +395,13 @@ func (d *daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"version":   st.Version,
 		"socket":    d.layout.DockerSock,
 		"start_err": startErr,
-	})
+	}
+	if sh, ok := d.be.(backend.Sheller); ok {
+		if addr, err := sh.AgentAddr(); err == nil {
+			out["agent_addr"] = addr
+		}
+	}
+	writeJSON(w, out)
 }
 
 func (d *daemon) handleStart(w http.ResponseWriter, r *http.Request) {

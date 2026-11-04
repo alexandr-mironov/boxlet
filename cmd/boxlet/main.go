@@ -37,6 +37,12 @@ func main() {
 		err = cmdUI(os.Args[2:])
 	case "priv":
 		err = cmdPriv(os.Args[2:])
+	case "set":
+		err = cmdSet(os.Args[2:])
+	case "service":
+		err = cmdService(os.Args[2:])
+	case "upgrade":
+		err = cmdUpgrade(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Printf("boxlet %s\n", version)
 	case "help", "--help", "-h":
@@ -65,6 +71,9 @@ func usage() {
   boxlet shell     shell внутри VM бэкенда
   boxlet ps        список контейнеров (через docker CLI)
   boxlet ui        открыть веб-интерфейс
+  boxlet set --cpus N --memory-mib N   ресурсы VM (после перезапуска)
+  boxlet service install|uninstall|status   автозапуск демона при входе (macOS)
+  boxlet upgrade   обновить гостевую ОС (свежий Alpine; данные сохраняются)
   boxlet priv install   установить privileged helper (порты <1024, /var/run/docker.sock)
   boxlet version   версия
 

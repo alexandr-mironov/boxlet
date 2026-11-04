@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"fmt"
-	"io"
 	"strings"
 	"time"
 )
@@ -79,6 +78,11 @@ DAEMONEOF
 # sysfs, который в netboot-окружении остаётся в failed-состоянии.
 /usr/bin/dockerd --config-file=/etc/docker/daemon.json >/var/log/dockerd.log 2>&1 &
 
+# Агент boxlet shell (приезжает внутри apkovl, если собран на хосте).
+if [ -x /usr/local/bin/boxlet-agent ]; then
+    /usr/local/bin/boxlet-agent >/var/log/boxlet-agent.log 2>&1 &
+fi
+
 # Ждём готовности и показываем диагностику в консоль.
 i=0
 while [ $i -lt 60 ]; do
@@ -90,9 +94,9 @@ if docker info >/dev/null 2>&1; then
     echo "boxlet: dockerd запущен"
     # Мини-образ со статическим busybox для служебных операций с хоста:
     # sync файловых систем перед остановкой VM (см. backend Stop).
-    mkdir -p /tmp/boxlet-agent
-    cp /bin/busybox /tmp/boxlet-agent/
-    (cd /tmp/boxlet-agent && tar -cf - busybox) | docker import - boxlet-agent:latest >/dev/null 2>&1 \
+    mkdir -p /tmp/boxlet-img
+    cp /bin/busybox /tmp/boxlet-img/
+    (cd /tmp/boxlet-img && tar -cf - busybox) | docker import - boxlet-agent:latest >/dev/null 2>&1 \
         && echo "boxlet: образ boxlet-agent готов"
 else
     echo "boxlet: dockerd НЕ запустился, последние строки лога:"
@@ -124,11 +128,20 @@ auto eth0
 iface eth0 inet dhcp
 `
 
+// tarFile — один элемент оверлея apkovl.
+type tarFile struct {
+	name     string
+	body     []byte
+	mode     int64
+	linkname string // для симлинков
+}
+
 // BuildApkovl генерирует apkovl.tar.gz — оверлей /etc для diskless-загрузки
 // Alpine: сеть, репозитории, автозапуск сервиса local с bootstrap-скриптом.
 // mounts — каталоги хоста для virtiofs-шар (darwin-vz); rosetta — включить
-// эмуляцию linux/amd64 через Rosetta.
-func BuildApkovl(mirror, release string, mounts []string, rosetta bool) ([]byte, error) {
+// эмуляцию linux/amd64 через Rosetta; agent — статический бинарь
+// гостевого агента (boxlet shell), nil — shell будет недоступен.
+func BuildApkovl(mirror, release string, mounts []string, rosetta bool, agent []byte) ([]byte, error) {
 	repositories := fmt.Sprintf("%s/%s/main\n%s/%s/community\n", mirror, release, mirror, release)
 
 	// Секция шар хоста и Rosetta для bootstrap-скрипта.
@@ -147,16 +160,11 @@ func BuildApkovl(mirror, release string, mounts []string, rosetta bool) ([]byte,
 	}
 	script := fmt.Sprintf(bootstrapScript, extra.String())
 
-	files := []struct {
-		name     string
-		body     string
-		mode     int64
-		linkname string // для симлинков
-	}{
+	files := []tarFile{
 		{name: "etc/network/", mode: 0o755},
-		{name: "etc/network/interfaces", body: networkInterfaces, mode: 0o644},
+		{name: "etc/network/interfaces", body: []byte(networkInterfaces), mode: 0o644},
 		{name: "etc/apk/", mode: 0o755},
-		{name: "etc/apk/repositories", body: repositories, mode: 0o644},
+		{name: "etc/apk/repositories", body: []byte(repositories), mode: 0o644},
 		{name: "etc/init.d/", mode: 0o755},
 		{name: "etc/runlevels/", mode: 0o755},
 		{name: "etc/runlevels/default/", mode: 0o755},
@@ -164,7 +172,13 @@ func BuildApkovl(mirror, release string, mounts []string, rosetta bool) ([]byte,
 		{name: "etc/runlevels/boot/", mode: 0o755},
 		{name: "etc/runlevels/boot/networking", mode: 0o777, linkname: "/etc/init.d/networking"},
 		{name: "etc/local.d/", mode: 0o755},
-		{name: "etc/local.d/boxlet.start", body: script, mode: 0o755},
+		{name: "etc/local.d/boxlet.start", body: []byte(script), mode: 0o755},
+	}
+	if len(agent) > 0 {
+		files = append(files,
+			tarFile{name: "usr/local/bin/", mode: 0o755},
+			tarFile{name: "usr/local/bin/boxlet-agent", body: agent, mode: 0o755},
+		)
 	}
 
 	var buf bytes.Buffer
@@ -181,7 +195,7 @@ func BuildApkovl(mirror, release string, mounts []string, rosetta bool) ([]byte,
 		case f.linkname != "":
 			hdr.Typeflag = tar.TypeSymlink
 			hdr.Linkname = f.linkname
-		case f.body == "" && f.name[len(f.name)-1] == '/':
+		case len(f.body) == 0 && f.name[len(f.name)-1] == '/':
 			hdr.Typeflag = tar.TypeDir
 		default:
 			hdr.Typeflag = tar.TypeReg
@@ -191,7 +205,7 @@ func BuildApkovl(mirror, release string, mounts []string, rosetta bool) ([]byte,
 			return nil, err
 		}
 		if hdr.Typeflag == tar.TypeReg {
-			if _, err := io.WriteString(tw, f.body); err != nil {
+			if _, err := tw.Write(f.body); err != nil {
 				return nil, err
 			}
 		}

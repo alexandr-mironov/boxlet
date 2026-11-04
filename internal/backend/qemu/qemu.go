@@ -128,7 +128,8 @@ func (b *Backend) Start(ctx context.Context) error {
 
 	// qemu-бэкенд: без virtiofs-шар хоста (нужен virtiofsd — в roadmap)
 	// и без Rosetta (это привилегия darwin-vz).
-	apkovl, err := guest.BuildApkovl(b.cfg.AlpineMirror, b.cfg.AlpineRelease, nil, false)
+	agent, _ := guest.AgentBinary(runtime.GOARCH)
+	apkovl, err := guest.BuildApkovl(b.cfg.AlpineMirror, b.cfg.AlpineRelease, nil, false, agent)
 	if err != nil {
 		b.setState("error", err.Error())
 		return err
@@ -226,8 +227,12 @@ func (b *Backend) qemuArgs(assets *guest.Assets, nb *guest.NetbootServer) ([]str
 		"apkovl=" + nb.ApkovlURL(),
 	}, " ")
 
-	// Проброс портов: dockerd + пользовательские из конфига.
-	fwds := []string{fmt.Sprintf("hostfwd=tcp:127.0.0.1:%d-:%d", b.cfg.DockerPort, b.cfg.DockerPort)}
+	// Проброс портов: dockerd + гостевой агент (boxlet shell)
+	// + пользовательские из конфига.
+	fwds := []string{
+		fmt.Sprintf("hostfwd=tcp:127.0.0.1:%d-:%d", b.cfg.DockerPort, b.cfg.DockerPort),
+		fmt.Sprintf("hostfwd=tcp:127.0.0.1:%d-:%d", guest.AgentPort, guest.AgentPort),
+	}
 	fwds = append(fwds, b.forwardedPorts()...)
 	netdev := "user,id=n0," + strings.Join(fwds, ",")
 
@@ -361,10 +366,21 @@ func (b *Backend) GuestSocket(ctx context.Context) (net.Conn, error) {
 	return d.DialContext(ctx, "tcp", addr)
 }
 
-// Exec в M1 не поддержан: shell в гостевую ОС появится с гостевым агентом (M2).
-// Обходной путь: docker run -it --rm --privileged --pid=host alpine nsenter -t 1 -m sh
+// AgentAddr — адрес гостевого агента через hostfwd. Реализует backend.Sheller.
+func (b *Backend) AgentAddr() (string, error) {
+	if !b.running() {
+		return "", errors.New("VM не запущена")
+	}
+	return fmt.Sprintf("127.0.0.1:%d", guest.AgentPort), nil
+}
+
+// Exec выполняет команду в гостевой ОС через boxlet-agent.
 func (b *Backend) Exec(ctx context.Context, cmd ...string) ([]byte, error) {
-	return nil, errors.New("shell в VM появится в M2; обходной путь: docker run -it --rm --privileged --pid=host alpine nsenter -t 1 -m sh")
+	addr, err := b.AgentAddr()
+	if err != nil {
+		return nil, err
+	}
+	return backend.AgentExec(ctx, addr, cmd)
 }
 
 // running сообщает, жив ли процесс qemu.

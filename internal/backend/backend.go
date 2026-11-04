@@ -57,6 +57,14 @@ type Porter interface {
 	GuestIP() (string, error)
 }
 
+// Sheller — бэкенд с гостевым агентом (boxlet-agent в VM):
+// даёт адрес для `boxlet shell` и интерактивных сессий.
+type Sheller interface {
+	Backend
+	// AgentAddr возвращает host:port гостевого агента, доступный с хоста.
+	AgentAddr() (string, error)
+}
+
 // Driver — фабрика бэкенда.
 type Driver func() Backend
 
@@ -83,6 +91,26 @@ func Available() []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+// AgentExec выполняет команду в гостевой ОС через boxlet-agent
+// (одно соединение = одна команда; протокол см. cmd/boxlet-agent).
+// Используется реализациями Backend.Exec.
+func AgentExec(ctx context.Context, addr string, argv []string) ([]byte, error) {
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("агент гостевой ОС недоступен (%s): %w", addr, err)
+	}
+	defer conn.Close()
+	if _, err := fmt.Fprintf(conn, "%s\n", strings.Join(argv, "\x00")); err != nil {
+		return nil, err
+	}
+	// stdin команды не нужен — закрываем запись, чтобы команда увидела EOF.
+	if tc, ok := conn.(*net.TCPConn); ok {
+		tc.CloseWrite()
+	}
+	return io.ReadAll(conn)
 }
 
 // SyncGuest сбрасывает гостевой page cache на диск через служебный
