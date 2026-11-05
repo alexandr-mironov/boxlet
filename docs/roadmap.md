@@ -55,7 +55,21 @@
       (`boxlet dns install`)
 - [x] веб-интерфейс: live-метрики гостя (load, RAM), кнопка «Рестарт»
       (`POST /api/restart`), просмотр логов (`GET /api/logs`) со слежением;
-      фикс гонки Stop→Start (reap зомби-процесса boxlet-vm)
+      фикс гонки Stop→Start (reap зомби-процесса boxlet-vm);
+      stop/restart сериализованы и не зависят от HTTP-соединения клиента
+- [x] mTLS к dockerd в госте (tlsverify; комплект CA/server/client
+      выпускается в ~/.boxlet/certs при первом запуске); без клиентского
+      сертификата порт dockerd недоступен никому
+- [x] секреты гостя вне apkovl: TLS-ключи и токен агента едут отдельным
+      каналом (qemu fw_cfg / read-only virtiofs-шара на время загрузки);
+      netboot отдаёт оверлей по случайному пути и закрывается
+- [x] штатная остановка гостевой ОС: sync + USR2 в init через гостевого
+      агента → openrc shutdown (dockerd гасится, data-диск отмонтируется);
+      SIGTERM/SIGKILL — только запасной путь по таймауту
+- [x] qemu: `Stop` прерывает идущий `Start`; подхват VM после падения
+      демона (по pidfile с проверкой процесса)
+- [x] релиз-пайплайн: тег v* → сборка в CI → GitHub Release с tarball'ом
+      и sha256; установка одной командой (`install.sh`, curl | bash)
 - [ ] vsock-канал вместо TCP для прокси сокета и агента
 - [ ] pty в boxlet shell (сейчас строчный режим без pty)
 

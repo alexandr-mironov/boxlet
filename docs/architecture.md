@@ -149,13 +149,23 @@ unix-сокете и пробрасывает в гостевой dockerd, не 
 stdin после attach-запроса) пробрасывается через CloseWrite, оба
 направления дожидаются друг друга — иначе теряется вывод контейнера.
 
-## Веб-интерфейс (GUI MVP)
+## Веб-интерфейс и трей
 
 `boxletd` слушает `http://127.0.0.1:9770` и отдаёт SPA (embedded FS):
-список контейнеров, образы, кнопки start/stop, статус VM.
-Данные — проксирование вызовов Docker API + собственный `/api/status`.
-Полноценный desktop GUI планируется поверх того же API демона
-(см. docs/roadmap.md).
+статус и live-метрики VM (load, RAM — через гостевого агента), список
+контейнеров, кнопки start/stop/restart, просмотр логов (демон, VM,
+dockerd, агент) со слежением. Данные — проксирование вызовов Docker API
++ собственные `/api/status`, `/api/metrics`, `/api/logs`, `/api/restart`.
+
+Поверх того же API работает менюбар-трей macOS (`boxlet tray`,
+tray/boxlet-tray.swift на AppKit, собирается swiftc): иконка с состоянием,
+метрики, start/stop/restart, запуск демона. Полноценный desktop GUI
+планируется поверх того же API демона (см. docs/roadmap.md).
+
+Тонкость жизненного цикла: stop/restart в API демона выполняются с
+контекстом Background и сериализованы мьютексом — обрыв HTTP-соединения
+(трей шлёт POST, не дожидаясь ответа) не должен прерывать остановку
+посередине.
 
 ## Секреты гостевой ОС
 
@@ -197,12 +207,16 @@ TLS-пара dockerd и токен агента не кладутся в apkovl:
 ```
 ~/.boxlet/
   config.json          # конфигурация инстанса
+  bin/                 # установленные из релиза бинари (install.sh),
+                       # здесь же setuid-копия boxlet-priv
   run/
     boxletd.pid        # pid демона
-    qemu.pid           # pid VM
+    boxlet-vm.pid      # pid VM (darwin-vz; у qemu — qemu.pid)
     docker.sock        # публичный Docker API сокет (0600)
+    agent-token        # токен гостевого агента (0600)
+    guest-secrets/     # TLS-ключи и токен для гостя (0700, см. «Секреты»)
   certs/               # TLS-комплект для dockerd в VM (0700)
   images/              # netboot-файлы Alpine (kernel, initramfs, modloop)
-  data/                # qcow2-диск под данные dockerd
-  logs/                # логи демона, qemu и серийной консоли VM
+  data/                # диск данных dockerd (qcow2 у qemu, raw у darwin-vz)
+  logs/                # логи демона, VM, хелперов (см. boxlet logs)
 ```

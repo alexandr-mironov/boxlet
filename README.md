@@ -2,17 +2,39 @@
 
 Лёгкий менеджер контейнеров — альтернатива Docker Desktop и OrbStack.
 
-Ключевой принцип — **максимальная совместимость**: boxlet поднимает
-стандартный Docker Engine API, поэтому существующие инструменты
+Ключевой принцип — **максимальная совместимость**: внутри VM работает
+настоящий Docker Engine (`dockerd`), поэтому существующие инструменты
 (`docker` CLI, `docker compose`, testcontainers и любые клиенты
 Docker API) работают без изменений, а переход с Docker Desktop / OrbStack
 занимает минуты.
+
+## Возможности
+
+- **Быстрый старт на Apple Silicon** — VM на Virtualization.framework
+  грузится за секунды, без стороннего гипервизора
+- **Настоящий dockerd** — полная совместимость API, включая
+  `docker run -it`, attach и testcontainers
+- **Rosetta** — образы `linux/amd64` работают из коробки
+- **Bind-mount каталогов хоста** через virtiofs: `-v ~/projects:/src`
+  просто работает
+- **Прозрачный проброс портов** контейнеров на `127.0.0.1`,
+  включая порты <1024 (через `boxlet priv install`)
+- **mTLS к dockerd** — к Docker API в VM не подключиться без клиентского
+  сертификата (выпускается автоматически при первом запуске)
+- **Имена `*.boxlet.local`** для опубликованных портов (`boxlet dns install`)
+- **Менюбар-трей** (`boxlet tray`) и **веб-интерфейс** (статус, контейнеры,
+  live-метрики, логи, рестарт)
+- **CLI полного цикла**: `init`, `start`, `stop`, `status`, `logs`,
+  `shell`, `set` (ресурсы VM), `service` (автозапуск), `upgrade`
+- **Гостевой агент с токен-аутентификацией** для shell и диагностики
+- Штатная остановка гостевой ОС (sync + poweroff), данные на диске
+  переживают перезапуски и обновления
 
 ## Как это работает
 
 ```
 ┌─────────────────────────────┐
-│  boxlet CLI / GUI (web ui)  │
+│ CLI / веб-интерфейс / трей  │
 └──────────────┬──────────────┘
                │
 ┌──────────────▼──────────────┐
@@ -46,7 +68,7 @@ Docker API) работают без изменений, а переход с Doc
 
 ## Быстрый старт
 
-### Установка из готового релиза (macOS, Apple Silicon)
+### 1. Установка из готового релиза (macOS, Apple Silicon)
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/alexandr-mironov/boxlet/main/install.sh | bash
@@ -56,13 +78,18 @@ curl -fsSL https://raw.githubusercontent.com/alexandr-mironov/boxlet/main/instal
 в `~/.boxlet/bin` (+ симлинк `/usr/local/bin/boxlet`, если есть права).
 sudo не нужен.
 
-### Установка из исходников
+### 1-alt. Установка из исходников
 
 ```sh
 # зависимости: qemu (brew install qemu) — только для qemu-бэкенда;
 # darwin-vz собирается штатным swiftc из Xcode CLT
 make build   # на macOS также собирает и подписывает bin/boxlet-vm
+export PATH="$PWD/bin:$PATH"
+```
 
+### 2. Запуск
+
+```sh
 # инициализация (создаёт ~/.boxlet, скачивает образы Alpine)
 boxlet init
 
@@ -77,6 +104,26 @@ export DOCKER_HOST=unix://$HOME/.boxlet/run/docker.sock
 docker ps
 ```
 
+### 3. Опционально
+
+```sh
+boxlet priv install      # порты <1024 и симлинк /var/run/docker.sock
+                         # (один раз, GUI-запрос пароля администратора)
+boxlet dns install       # имена *.boxlet.local → адрес гостевой ОС
+boxlet service install   # автозапуск демона при входе в систему
+boxlet tray              # иконка в менюбаре: статус, метрики, start/stop
+```
+
+### Удаление
+
+```sh
+boxlet stop
+boxlet service uninstall  # если включали автозапуск
+boxlet dns uninstall      # если включали DNS
+sudo rm /var/run/docker.sock  # если создавали симлинк
+rm -rf ~/.boxlet /usr/local/bin/boxlet
+```
+
 ## Структура репозитория
 
 - `cmd/boxlet` — CLI (init/start/stop/status/doctor/shell/logs/dns/tray/set/service/upgrade/ps/...)
@@ -89,10 +136,13 @@ docker ps
 - `internal/proxy` — проксирование Docker API сокета из VM на хост
 - `internal/dnsd` — DNS-сервер зоны *.boxlet.local → адрес гостевой ОС
 - `internal/config`, `internal/paths` — конфигурация и пути инстанса
-- `internal/webui` — встроенный веб-интерфейс (GUI MVP)
+- `internal/webui` — встроенный веб-интерфейс (статус, контейнеры,
+  live-метрики, логи, рестарт)
 - `vmhelper/` — Swift-хелпер `boxlet-vm` (Virtualization.framework)
   и entitlements для ad-hoc подписи
 - `tray/` — менюбар-трей macOS `boxlet-tray` (AppKit, без зависимостей)
+- `install.sh` — установщик из релиза (curl | bash)
+- `.github/workflows/` — CI (vet, тесты, сборка) и релиз-пайплайн по тегу
 - `docs/` — архитектура, роадмап, заметки по совместимости
 
 ## Документация
