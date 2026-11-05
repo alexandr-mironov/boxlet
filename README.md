@@ -1,46 +1,51 @@
 # Boxlet
 
-Лёгкий менеджер контейнеров — альтернатива Docker Desktop и OrbStack.
+**English** | [Русский](README.ru.md)
 
-Ключевой принцип — **максимальная совместимость**: внутри VM работает
-настоящий Docker Engine (`dockerd`), поэтому существующие инструменты
-(`docker` CLI, `docker compose`, testcontainers и любые клиенты
-Docker API) работают без изменений, а переход с Docker Desktop / OrbStack
-занимает минуты.
+A lightweight container manager — a **free and open-source** alternative
+to Docker Desktop and OrbStack for macOS.
 
-## Возможности
+The key principle is **maximum compatibility**: a real Docker Engine
+(`dockerd`) runs inside the VM, so your existing tools (`docker` CLI,
+`docker compose`, testcontainers, and any Docker API client) work
+unchanged, and switching from Docker Desktop / OrbStack takes minutes.
+Boxlet is free for everyone, including commercial use — no accounts,
+no subscriptions, no telemetry (Apache 2.0, see [LICENSE](LICENSE)
+and [NOTICE](NOTICE)).
 
-- **Быстрый старт на Apple Silicon** — VM на Virtualization.framework
-  грузится за секунды, без стороннего гипервизора
-- **Настоящий dockerd** — полная совместимость API, включая
-  `docker run -it`, attach и testcontainers
-- **Rosetta** — образы `linux/amd64` работают из коробки
-- **Bind-mount каталогов хоста** через virtiofs: `-v ~/projects:/src`
-  просто работает
-- **Прозрачный проброс портов** контейнеров на `127.0.0.1`,
-  включая порты <1024 (через `boxlet priv install`)
-- **mTLS к dockerd** — к Docker API в VM не подключиться без клиентского
-  сертификата (выпускается автоматически при первом запуске)
-- **Имена `*.boxlet.local`** для опубликованных портов (`boxlet dns install`)
-- **Менюбар-трей** (`boxlet tray`) и **веб-интерфейс** (статус, контейнеры,
-  live-метрики, логи, рестарт)
-- **CLI полного цикла**: `init`, `start`, `stop`, `status`, `logs`,
-  `shell`, `set` (ресурсы VM), `service` (автозапуск), `upgrade`
-- **Гостевой агент с токен-аутентификацией** для shell и диагностики
-- Штатная остановка гостевой ОС (sync + poweroff), данные на диске
-  переживают перезапуски и обновления
+## Features
 
-## Как это работает
+- **Fast startup on Apple Silicon** — a Virtualization.framework VM
+  boots in seconds, no third-party hypervisor
+- **Real dockerd** — full API compatibility, including `docker run -it`,
+  attach, and testcontainers
+- **Rosetta** — `linux/amd64` images work out of the box
+- **Host directory bind mounts** via virtiofs: `-v ~/projects:/src`
+  just works
+- **Transparent port forwarding** of container ports to `127.0.0.1`,
+  including privileged ports <1024 (via `boxlet priv install`)
+- **mTLS to dockerd** — the Docker API in the VM rejects connections
+  without a client certificate (issued automatically on first start)
+- **`*.boxlet.local` names** for published ports (`boxlet dns install`)
+- **Menu bar tray** (`boxlet tray`) and a **web UI** (status, containers,
+  live metrics, logs, restart)
+- **Full-lifecycle CLI**: `init`, `start`, `stop`, `status`, `logs`,
+  `shell`, `set` (VM resources), `service` (launch at login), `upgrade`
+- **Token-authenticated guest agent** for shell access and diagnostics
+- Graceful guest shutdown (sync + poweroff); the data disk survives
+  restarts and upgrades
+
+## How it works
 
 ```
 ┌─────────────────────────────┐
-│ CLI / веб-интерфейс / трей  │
+│   CLI / web UI / menu tray  │
 └──────────────┬──────────────┘
                │
 ┌──────────────▼──────────────┐
-│  boxletd (демон-суревизор)  │
+│  boxletd (supervisor daemon)│
 │  ├─ socket proxy            │◄── ~/.boxlet/run/docker.sock
-│  │     (/var/run/docker.sock├── symlink для совместимости)
+│  │     (/var/run/docker.sock├── symlink for compatibility)
 │  └─ backend driver          │
 └──────────────┬──────────────┘
                │
@@ -50,109 +55,113 @@ Docker API) работают без изменений, а переход с Doc
 └─────────────────────────────┘
 ```
 
-Бэкенды (драйверы запуска контейнерного рантайма):
+Backends (container runtime drivers):
 
-| Платформа | Драйвер | Статус |
+| Platform | Driver | Status |
 |---|---|---|
-| macOS (Apple Silicon) | `darwin-vz` — Virtualization.framework через helper | работает: Rosetta (linux/amd64), virtiofs bind-mount |
-| macOS / Linux | `qemu` — diskless Alpine VM с dockerd | работает |
-| Windows | `wsl2` — managed WSL2-дистрибутив | каркас |
-| Linux | `linux` — нативный dockerd без VM | каркас |
+| macOS (Apple Silicon) | `darwin-vz` — Virtualization.framework via a Swift helper | works: Rosetta (linux/amd64), virtiofs bind mounts |
+| macOS / Linux | `qemu` — diskless Alpine VM with dockerd | works |
+| Windows | `wsl2` — managed WSL2 distribution | scaffold |
+| Linux | `linux` — native dockerd, no VM | scaffold |
 
-Выбор бэкенда — поле `backend` в `~/.boxlet/config.json`
-(`darwin-vz`, `qemu`). На Apple Silicon рекомендуется `darwin-vz`:
-загрузка за секунды, Rosetta и bind-mount каталогов хоста.
+The backend is selected by the `backend` field in `~/.boxlet/config.json`
+(`darwin-vz`, `qemu`). On Apple Silicon `darwin-vz` is recommended:
+seconds-fast boot, Rosetta, and host directory bind mounts.
 
-Внутри VM разворачивается минимальный diskless Alpine Linux с `dockerd`,
-т.е. API и поведение полностью совпадают с «настоящим» Docker.
+Inside the VM runs a minimal diskless Alpine Linux with `dockerd`,
+so the API and behavior are identical to "real" Docker.
 
-## Быстрый старт
+## Quick start
 
-### 1. Установка из готового релиза (macOS, Apple Silicon)
+### 1. Install from a prebuilt release (macOS, Apple Silicon)
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/alexandr-mironov/boxlet/main/install.sh | bash
 ```
 
-Скрипт скачивает последний релиз, проверяет sha256 и кладёт бинари
-в `~/.boxlet/bin` (+ симлинк `/usr/local/bin/boxlet`, если есть права).
-sudo не нужен.
+The script downloads the latest release, verifies the sha256 checksum,
+and places the binaries into `~/.boxlet/bin` (plus a
+`/usr/local/bin/boxlet` symlink if writable). No sudo required.
 
-### 1-alt. Установка из исходников
+### 1-alt. Build from source
 
 ```sh
-# зависимости: qemu (brew install qemu) — только для qemu-бэкенда;
-# darwin-vz собирается штатным swiftc из Xcode CLT
-make build   # на macOS также собирает и подписывает bin/boxlet-vm
+# dependencies: qemu (brew install qemu) — only for the qemu backend;
+# darwin-vz builds with the stock swiftc from Xcode CLT
+make build   # on macOS also builds and ad-hoc signs bin/boxlet-vm
 export PATH="$PWD/bin:$PATH"
 ```
 
-### 2. Запуск
+### 2. Run
 
 ```sh
-# инициализация (создаёт ~/.boxlet, скачивает образы Alpine)
+# initialize (creates ~/.boxlet, downloads Alpine images)
 boxlet init
 
-# запуск (первая загрузка VM — несколько минут)
+# start (the first VM boot takes a few minutes)
 boxlet start
 
-# проверка окружения
+# check the environment
 boxlet doctor
 
-# дальше — обычный docker
+# then just use docker
 export DOCKER_HOST=unix://$HOME/.boxlet/run/docker.sock
 docker ps
 ```
 
-### 3. Опционально
+### 3. Optional
 
 ```sh
-boxlet priv install      # порты <1024 и симлинк /var/run/docker.sock
-                         # (один раз, GUI-запрос пароля администратора)
-boxlet dns install       # имена *.boxlet.local → адрес гостевой ОС
-boxlet service install   # автозапуск демона при входе в систему
-boxlet tray              # иконка в менюбаре: статус, метрики, start/stop
+boxlet priv install      # ports <1024 and the /var/run/docker.sock symlink
+                         # (one time, macOS GUI password prompt)
+boxlet dns install       # *.boxlet.local names resolve to the guest OS
+boxlet service install   # launch the daemon at login
+boxlet tray              # menu bar icon: status, metrics, start/stop
 ```
 
-### Удаление
+### Uninstall
 
 ```sh
 boxlet stop
-boxlet service uninstall  # если включали автозапуск
-boxlet dns uninstall      # если включали DNS
-sudo rm /var/run/docker.sock  # если создавали симлинк
+boxlet service uninstall  # if you enabled launch at login
+boxlet dns uninstall      # if you enabled DNS
+sudo rm /var/run/docker.sock  # if you created the symlink
 rm -rf ~/.boxlet /usr/local/bin/boxlet
 ```
 
-## Структура репозитория
+## Repository layout
 
 - `cmd/boxlet` — CLI (init/start/stop/status/doctor/shell/logs/dns/tray/set/service/upgrade/ps/...)
-- `cmd/boxletd` — демон: управляет VM, сокет-прокси, DNS и веб-интерфейсом
-- `cmd/boxlet-agent` — агент в гостевой ОС для `boxlet shell` (linux, static)
-- `cmd/boxlet-priv` — setuid-хелпер: порты <1024, symlink /var/run/docker.sock,
-  /etc/resolver/boxlet
-- `internal/backend` — интерфейс драйвера + реализации per-платформа
-- `internal/guest` — гостевая ОС: скачивание Alpine, apkovl-оверлей
-- `internal/proxy` — проксирование Docker API сокета из VM на хост
-- `internal/dnsd` — DNS-сервер зоны *.boxlet.local → адрес гостевой ОС
-- `internal/config`, `internal/paths` — конфигурация и пути инстанса
-- `internal/webui` — встроенный веб-интерфейс (статус, контейнеры,
-  live-метрики, логи, рестарт)
-- `vmhelper/` — Swift-хелпер `boxlet-vm` (Virtualization.framework)
-  и entitlements для ad-hoc подписи
-- `tray/` — менюбар-трей macOS `boxlet-tray` (AppKit, без зависимостей)
-- `install.sh` — установщик из релиза (curl | bash)
-- `.github/workflows/` — CI (vet, тесты, сборка) и релиз-пайплайн по тегу
-- `docs/` — архитектура, роадмап, заметки по совместимости
+- `cmd/boxletd` — daemon: manages the VM, socket proxy, DNS, and web UI
+- `cmd/boxlet-agent` — guest OS agent for `boxlet shell` (linux, static)
+- `cmd/boxlet-priv` — setuid helper: ports <1024, /var/run/docker.sock
+  symlink, /etc/resolver/boxlet
+- `internal/backend` — driver interface + per-platform implementations
+- `internal/guest` — guest OS: Alpine downloads, apkovl overlay
+- `internal/proxy` — Docker API socket proxying from the VM to the host
+- `internal/dnsd` — DNS server for the *.boxlet.local zone → guest OS IP
+- `internal/config`, `internal/paths` — instance configuration and paths
+- `internal/webui` — embedded web UI (status, containers, live metrics,
+  logs, restart)
+- `vmhelper/` — the `boxlet-vm` Swift helper (Virtualization.framework)
+  and entitlements for ad-hoc signing
+- `tray/` — macOS menu bar tray `boxlet-tray` (AppKit, no dependencies)
+- `install.sh` — release installer (curl | bash)
+- `.github/workflows/` — CI (vet, tests, build) and the tag-driven
+  release pipeline
+- `docs/` — architecture, roadmap, compatibility notes
 
-## Документация
+## Documentation
 
-- [Архитектура](docs/architecture.md)
-- [Совместимость](docs/compat.md)
-- [Роадмап](docs/roadmap.md)
+- [Architecture](docs/architecture.md)
+- [Compatibility](docs/compat.md)
+- [Roadmap](docs/roadmap.md)
 
-## Лицензия
+Note: in-depth docs are currently in Russian; an English translation
+is on the way.
 
-[Apache License 2.0](LICENSE). Использование и производные работы требуют
-сохранения уведомления из файла [NOTICE](NOTICE) со ссылкой на
-исходный репозиторий (п. 4(d) лицензии).
+## License
+
+[Apache License 2.0](LICENSE) — free and open source, commercial use
+allowed. Derivative works must retain the attribution notice from
+[NOTICE](NOTICE) with a link to this repository (§4(d)).
