@@ -77,9 +77,7 @@ func (d *daemon) handleRestart(w http.ResponseWriter, r *http.Request) {
 	}
 	go func() {
 		log.Printf("boxletd: рестарт движка по запросу")
-		d.stopPortForwarding()
-		d.px.Stop()
-		if err := d.be.Stop(context.Background()); err != nil {
+		if err := d.stopEngine(); err != nil {
 			log.Printf("boxletd: рестарт: остановка: %v", err)
 		}
 		// Страховка: ждём, пока бэкенд реально отчитается об остановке,

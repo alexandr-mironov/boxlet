@@ -50,6 +50,11 @@ type daemon struct {
 	dnsCancel context.CancelFunc
 	privCmd   *exec.Cmd // boxlet-priv: порты <1024
 	privKey   string    // текущий делегированный список портов
+
+	// opMu сериализует остановку и рестарт движка: два параллельных
+	// stop/restart (трей шлёт POST, не дожидаясь ответа) не должны
+	// гонять друг с другом внутри Backend.Stop.
+	opMu sync.Mutex
 }
 
 func main() {
@@ -454,13 +459,24 @@ func (d *daemon) handleStop(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
 	}
-	d.stopPortForwarding()
-	d.px.Stop()
-	if err := d.be.Stop(r.Context()); err != nil {
+	if err := d.stopEngine(); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+// stopEngine останавливает движок. Контекст — Background, а не контекст
+// запроса: обрыв HTTP-соединения (трей шлёт POST и не ждёт ответа) не
+// должен прерывать Stop посередине — иначе движок застревал в состоянии
+// «stopping» навсегда, а старт после этого падал с «уже запущен».
+// Вызовы сериализованы opMu (см. поле daemon).
+func (d *daemon) stopEngine() error {
+	d.opMu.Lock()
+	defer d.opMu.Unlock()
+	d.stopPortForwarding()
+	d.px.Stop()
+	return d.be.Stop(context.Background())
 }
 
 // handleContainers проксирует GET /containers/json в dockerd.
