@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -8,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 )
 
 // PortForwarder пробрасывает TCP-порты с localhost на порты гостевой ОС.
@@ -63,9 +65,11 @@ func (f *PortForwarder) SetPorts(ports map[int]int) {
 		ln, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(hostPort))
 		if err != nil {
 			// Логируем один раз на порт, пока причина не изменится.
+			// Настоящую ошибку не подменяем: «порт занят» и «нет прав»
+			// требуют разных действий.
 			reason := err.Error()
-			if hostPort < 1024 {
-				reason = "порт <1024 требует root (или установите хелпер: boxlet priv install)"
+			if hostPort < 1024 && errors.Is(err, syscall.EACCES) {
+				reason += " — порт <1024 требует root (или установите хелпер: boxlet priv install)"
 			}
 			if f.failed[hostPort] != reason {
 				f.failed[hostPort] = reason
@@ -78,6 +82,13 @@ func (f *PortForwarder) SetPorts(ports map[int]int) {
 		log.Printf("boxletd: проброс 127.0.0.1:%d → гость:%d", hostPort, guestPort)
 		go f.acceptLoop(ln, hostPort, guestPort)
 	}
+}
+
+// Active возвращает число открытых слушателей.
+func (f *PortForwarder) Active() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.ln)
 }
 
 // Close закрывает все слушатели.
