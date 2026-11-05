@@ -24,6 +24,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -31,6 +32,7 @@ import (
 	"os/user"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/alexandr-mironov/boxlet/internal/config"
 	"github.com/alexandr-mironov/boxlet/internal/dnsd"
@@ -95,6 +97,19 @@ func cmdForward(specs []string) error {
 		}
 	}
 
+	// Не больше одного forward одновременно: демон перезапускает хелпер
+	// при смене списка портов, и лишняя копия только бы висела, не сумев
+	// занять уже занятые порты.
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	lock, err := lockForward(exe)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -108,6 +123,12 @@ func cmdForward(specs []string) error {
 	})
 	// Bind происходит здесь, пока есть euid=0.
 	fwd.SetPorts(ports)
+	if fwd.Active() == 0 {
+		// Держать процесс без единого слушателя незачем: демон увидит
+		// выход и повторит попытку с паузой (см. privSupervisor).
+		fwd.Close()
+		return errors.New("не удалось занять ни одного порта (см. причины выше)")
+	}
 
 	// Сбрасываем привилегии: дальше процесс работает как обычный
 	// пользователь, держа уже открытые слушатели.
@@ -132,7 +153,15 @@ func cmdForward(specs []string) error {
 	log.Printf("проксирую привилегированные порты: %v", keys(ports))
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	<-sig
+	// Демон умер, не остановив хелпер (kill -9, крэш), — выходим сами,
+	// иначе хелпер остался бы сиротой, держащим порты.
+	parentGone := make(chan struct{})
+	watchParent(os.Getppid(), time.Second, func() { close(parentGone) })
+	select {
+	case <-sig:
+	case <-parentGone:
+		log.Print("boxletd завершился — выхожу")
+	}
 	fwd.Close()
 	return nil
 }

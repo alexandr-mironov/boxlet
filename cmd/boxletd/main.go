@@ -12,7 +12,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sort"
@@ -48,8 +47,7 @@ type daemon struct {
 	fwd       *proxy.PortForwarder
 	fwdCancel context.CancelFunc
 	dnsCancel context.CancelFunc
-	privCmd   *exec.Cmd // boxlet-priv: порты <1024
-	privKey   string    // текущий делегированный список портов
+	priv      *privSupervisor // boxlet-priv: порты <1024
 
 	// opMu сериализует остановку и рестарт движка: два параллельных
 	// stop/restart (трей шлёт POST, не дожидаясь ответа) не должны
@@ -84,7 +82,8 @@ func run() error {
 		return err
 	}
 
-	d := &daemon{cfg: cfg, root: root, layout: layout, be: be, px: proxy.New(be, layout.DockerSock)}
+	d := &daemon{cfg: cfg, root: root, layout: layout, be: be, px: proxy.New(be, layout.DockerSock),
+		priv: newPrivSupervisor(privhelper.Path, filepath.Join(layout.LogsDir, "boxlet-priv.log"))}
 
 	// Control API + веб-интерфейс — поднимаем СРАЗУ, до запуска бэкенда:
 	// загрузка VM занимает минуты, и CLI должен видеть прогресс.
@@ -226,12 +225,7 @@ func (d *daemon) stopPortForwarding() {
 		d.dnsCancel()
 		d.dnsCancel = nil
 	}
-	if d.privCmd != nil && d.privCmd.Process != nil {
-		d.privCmd.Process.Signal(syscall.SIGTERM)
-		d.privCmd.Wait()
-		d.privCmd = nil
-	}
-	d.privKey = ""
+	d.priv.Stop()
 	if d.fwdCancel == nil {
 		return
 	}
@@ -291,61 +285,20 @@ func (d *daemon) reconcilePorts(ctx context.Context, fwd *proxy.PortForwarder) {
 
 	// Порты <1024 биндит setuid-хелпер boxlet-priv: демон передаёт ему
 	// список и перезапускает при изменении (bind без root невозможен,
-	// а хелпер сбрасывает права сразу после bind).
+	// а хелпер сбрасывает права сразу после bind). Хелпер удалили —
+	// останавливаем запущенный.
+	var specs []string
 	if privhelper.Installed() {
-		priv := map[int]int{}
 		for h, g := range ports {
 			if h < 1024 {
-				priv[h] = g
+				specs = append(specs, fmt.Sprintf("%d:%d", h, g))
 				delete(ports, h)
 			}
 		}
-		d.reconcilePriv(priv)
+		sort.Strings(specs)
 	}
+	d.priv.Reconcile(specs)
 	fwd.SetPorts(ports)
-}
-
-// reconcilePriv приводит набор портов, делегированных boxlet-priv,
-// к нужному: при изменении списка хелпер перезапускается.
-func (d *daemon) reconcilePriv(priv map[int]int) {
-	specs := make([]string, 0, len(priv))
-	for h, g := range priv {
-		specs = append(specs, fmt.Sprintf("%d:%d", h, g))
-	}
-	sort.Strings(specs)
-	key := strings.Join(specs, ",")
-
-	d.fwdMu.Lock()
-	defer d.fwdMu.Unlock()
-	if d.privCmd != nil && d.privCmd.Process != nil &&
-		d.privCmd.Process.Signal(syscall.Signal(0)) == nil && d.privKey == key {
-		return // актуальный хелпер уже работает
-	}
-	if d.privCmd != nil && d.privCmd.Process != nil {
-		d.privCmd.Process.Signal(syscall.SIGTERM)
-		d.privCmd.Wait()
-		d.privCmd = nil
-	}
-	d.privKey = key
-	if len(specs) == 0 {
-		return
-	}
-	path, err := privhelper.Path()
-	if err != nil {
-		return
-	}
-	args := append([]string{"forward"}, specs...)
-	cmd := exec.Command(path, args...)
-	logFile, err := os.OpenFile(filepath.Join(d.layout.LogsDir, "boxlet-priv.log"),
-		os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err == nil {
-		cmd.Stdout, cmd.Stderr = logFile, logFile
-	}
-	if err := cmd.Start(); err != nil {
-		log.Printf("boxletd: boxlet-priv: %v", err)
-		return
-	}
-	log.Printf("boxletd: boxlet-priv (pid %d): порты %s", cmd.Process.Pid, key)
 }
 
 // startError возвращает ошибку последней попытки запуска, если была.
