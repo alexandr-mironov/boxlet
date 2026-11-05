@@ -55,8 +55,9 @@ func (p *Proxy) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("слушать %s: %w", p.socket, err)
 	}
-	// Сокет должен быть доступен текущему пользователю без ограничений.
-	if err := os.Chmod(p.socket, 0o777); err != nil {
+	// Доступ к сокету = root в VM: только владельцу, как и остальное
+	// в ~/.boxlet; другие пользователи машины подключаться не должны.
+	if err := os.Chmod(p.socket, 0o600); err != nil {
 		ln.Close()
 		return err
 	}

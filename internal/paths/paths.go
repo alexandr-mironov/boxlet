@@ -11,6 +11,7 @@ type Layout struct {
 	ImagesDir  string
 	DataDir    string
 	LogsDir    string
+	CertsDir   string
 }
 
 // New строит раскладку путей от корня инстанса.
@@ -22,5 +23,6 @@ func New(root string) Layout {
 		ImagesDir:  filepath.Join(root, "images"),
 		DataDir:    filepath.Join(root, "data"),
 		LogsDir:    filepath.Join(root, "logs"),
+		CertsDir:   filepath.Join(root, "certs"),
 	}
 }
