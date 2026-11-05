@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & publish (macOS arm64)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+
+      - name: Build
+        run: make build
+
+      - name: Package
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          P="boxlet_${V}_darwin-arm64"
+          mkdir -p "dist/$P"
+          cp bin/boxlet bin/boxletd bin/boxlet-vm bin/boxlet-priv bin/boxlet-tray \
+             bin/boxlet-agent-linux-arm64 bin/boxlet-agent-linux-amd64 "dist/$P/"
+          cp README.md LICENSE NOTICE "dist/$P/"
+          tar -C dist -czf "$P.tar.gz" "$P"
+          shasum -a 256 "$P.tar.gz" > "$P.tar.gz.sha256"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.sha256 --generate-notes

@@ -7,17 +7,19 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+
+	"github.com/alexandr-mironov/boxlet/internal/paths"
 )
 
 // cmdTray запускает иконку boxlet в менюбаре macOS (bin/boxlet-tray).
 // Трей опрашивает API демона сам, поэтому демон не обязан быть запущен —
 // из меню можно поднять и его.
 func cmdTray(args []string) error {
-	exe, err := os.Executable()
+	dir, err := paths.ExeDir()
 	if err != nil {
 		return err
 	}
-	tray := filepath.Join(filepath.Dir(exe), "boxlet-tray")
+	tray := filepath.Join(dir, "boxlet-tray")
 	if _, err := os.Stat(tray); err != nil {
 		return fmt.Errorf("boxlet-tray не найден рядом с CLI (%s); выполните make build", tray)
 	}

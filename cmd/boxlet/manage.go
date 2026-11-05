@@ -12,6 +12,7 @@ import (
 
 	"github.com/alexandr-mironov/boxlet/internal/backend"
 	"github.com/alexandr-mironov/boxlet/internal/config"
+	"github.com/alexandr-mironov/boxlet/internal/paths"
 )
 
 // cmdSet меняет ресурсы VM в конфиге: boxlet set --cpus 8 --memory-mib 8192.
@@ -122,11 +123,11 @@ const launchAgentTmpl = `<?xml version="1.0" encoding="UTF-8"?>
 `
 
 func serviceInstall(plist string) error {
-	exe, err := os.Executable()
+	dir, err := paths.ExeDir()
 	if err != nil {
 		return err
 	}
-	boxletd := filepath.Join(filepath.Dir(exe), "boxletd")
+	boxletd := filepath.Join(dir, "boxletd")
 	if _, err := os.Stat(boxletd); err != nil {
 		return fmt.Errorf("boxletd не найден рядом с CLI (%s)", boxletd)
 	}

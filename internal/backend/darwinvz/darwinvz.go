@@ -81,11 +81,11 @@ func (b *Backend) serialLog() string {
 
 // helperPath ищет boxlet-vm рядом с текущим исполняемым файлом.
 func helperPath() (string, error) {
-	exe, err := os.Executable()
+	dir, err := paths.ExeDir()
 	if err != nil {
 		return "", err
 	}
-	path := filepath.Join(filepath.Dir(exe), "boxlet-vm")
+	path := filepath.Join(dir, "boxlet-vm")
 	if _, err := os.Stat(path); err != nil {
 		return "", fmt.Errorf("helper boxlet-vm не найден по пути %s; соберите: make vm-helper", path)
 	}

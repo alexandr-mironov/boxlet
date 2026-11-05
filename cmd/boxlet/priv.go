@@ -2,10 +2,10 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"runtime"
 
+	"github.com/alexandr-mironov/boxlet/internal/paths"
 	"github.com/alexandr-mironov/boxlet/internal/privhelper"
 )
 
@@ -19,11 +19,11 @@ func cmdPriv(args []string) error {
 	if runtime.GOOS != "darwin" {
 		return fmt.Errorf("boxlet priv доступен только на macOS")
 	}
-	exe, err := os.Executable()
+	dir, err := paths.ExeDir()
 	if err != nil {
 		return err
 	}
-	src := filepath.Join(filepath.Dir(exe), "boxlet-priv")
+	src := filepath.Join(dir, "boxlet-priv")
 	fmt.Println("устанавливаю boxlet-priv (потребуется пароль администратора)…")
 	if err := privhelper.Install(src); err != nil {
 		return err

@@ -46,6 +46,18 @@ Docker API) работают без изменений, а переход с Doc
 
 ## Быстрый старт
 
+### Установка из готового релиза (macOS, Apple Silicon)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/alexandr-mironov/boxlet/main/install.sh | bash
+```
+
+Скрипт скачивает последний релиз, проверяет sha256 и кладёт бинари
+в `~/.boxlet/bin` (+ симлинк `/usr/local/bin/boxlet`, если есть права).
+sudo не нужен.
+
+### Установка из исходников
+
 ```sh
 # зависимости: qemu (brew install qemu) — только для qemu-бэкенда;
 # darwin-vz собирается штатным swiftc из Xcode CLT

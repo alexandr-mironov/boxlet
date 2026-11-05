@@ -73,11 +73,11 @@ func ensureDaemon() error {
 		return nil // уже работает
 	}
 
-	exe, err := os.Executable()
+	exeDir, err := paths.ExeDir()
 	if err != nil {
 		return err
 	}
-	boxletd := filepath.Join(filepath.Dir(exe), "boxletd")
+	boxletd := filepath.Join(exeDir, "boxletd")
 	if _, err := os.Stat(boxletd); err != nil {
 		return fmt.Errorf("демон boxletd не найден рядом с CLI (%s); выполните make build", boxletd)
 	}

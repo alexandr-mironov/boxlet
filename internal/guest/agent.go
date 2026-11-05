@@ -3,6 +3,8 @@ package guest
 import (
 	"os"
 	"path/filepath"
+
+	"github.com/alexandr-mironov/boxlet/internal/paths"
 )
 
 // AgentPort — порт гостевого агента boxlet-agent (см. cmd/boxlet-agent).
@@ -15,11 +17,11 @@ const AgentPort = 2376
 // Если файла нет — возвращает (nil, nil): VM загрузится без агента,
 // `boxlet shell` будет недоступен.
 func AgentBinary(goarch string) ([]byte, error) {
-	exe, err := os.Executable()
+	dir, err := paths.ExeDir()
 	if err != nil {
 		return nil, err
 	}
-	path := filepath.Join(filepath.Dir(exe), "boxlet-agent-linux-"+goarch)
+	path := filepath.Join(dir, "boxlet-agent-linux-"+goarch)
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return nil, nil
