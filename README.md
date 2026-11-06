@@ -79,9 +79,18 @@ so the API and behavior are identical to "real" Docker.
 curl -fsSL https://raw.githubusercontent.com/alexandr-mironov/boxlet/main/install.sh | bash
 ```
 
-The script downloads the latest release, verifies the sha256 checksum,
-and places the binaries into `~/.boxlet/bin` (plus a
-`/usr/local/bin/boxlet` symlink if writable). No sudo required.
+One command for both a fresh install and an upgrade. The script downloads
+the latest release and verifies its sha256, gracefully stops a running
+engine, places the binaries into `~/.boxlet/bin`, creates the config
+(an existing one is never touched), starts the engine and prints
+`boxlet doctor`. It asks for the administrator password once, and only
+when needed: for the `/usr/local/bin/boxlet` symlink and for the
+privileged helper (ports <1024) when it is installed already or your
+config forwards such ports. With `BOXLET_NO_SUDO=1` it skips those steps
+and adds `~/.boxlet/bin` to `PATH` in your shell profile instead;
+`BOXLET_NO_START=1` skips starting the engine.
+
+After installing from a release, step 2 below is already done.
 
 ### 1-alt. Build from source
 

@@ -154,3 +154,28 @@ func TestInstallViaOsascript(t *testing.T) {
 		t.Fatalf("установка через osascript: %v, права %v", err, fi.Mode())
 	}
 }
+
+func TestHasPrivilegedPorts(t *testing.T) {
+	cases := map[string]bool{
+		"80:80": true, "443:8443": true, "1023:1": true,
+		"1024:80": false, "8080:80": false, "bad": false, "": false,
+	}
+	for spec, want := range cases {
+		if got := hasPrivilegedPorts([]string{spec}); got != want {
+			t.Errorf("%q: %v, ожидалось %v", spec, got, want)
+		}
+	}
+	if !hasPrivilegedPorts([]string{"8080:80", "80:80"}) {
+		t.Error("список с одним портом <1024 должен требовать хелпер")
+	}
+}
+
+func TestStateNeedsInstall(t *testing.T) {
+	for st, want := range map[State]bool{
+		NotNeeded: false, UpToDate: false, Missing: true, Outdated: true, Legacy: true,
+	} {
+		if st.NeedsInstall() != want {
+			t.Errorf("%v: NeedsInstall=%v", st, !want)
+		}
+	}
+}

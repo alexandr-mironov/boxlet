@@ -81,7 +81,12 @@ func Default() *Config {
 func DefaultBackend() string {
 	switch runtime.GOOS {
 	case "darwin":
-		return "qemu" // darwin-vz появится в M2 (см. docs/roadmap.md)
+		// darwin-vz: Virtualization.framework, Rosetta, virtiofs; helper
+		// boxlet-vm собран только под Apple Silicon (релиз — darwin-arm64).
+		if runtime.GOARCH == "arm64" {
+			return "darwin-vz"
+		}
+		return "qemu"
 	case "windows":
 		return "wsl2"
 	default:

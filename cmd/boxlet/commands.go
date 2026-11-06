@@ -23,10 +23,22 @@ import (
 	"github.com/alexandr-mironov/boxlet/internal/paths"
 )
 
-// cmdInit — первичная настройка инстанса.
+// cmdInit — первичная настройка инстанса. Идемпотентна: существующий
+// конфиг не перезаписывается (в нём MAC VM, шары, порты и прочие
+// пользовательские настройки), создаются только недостающие каталоги.
+// Поэтому её безопасно вызывать и при обновлении (install.sh).
 func cmdInit(args []string) error {
-	cfg := config.Default()
 	root, err := config.Dir()
+	if err != nil {
+		return err
+	}
+	path, err := config.Path()
+	if err != nil {
+		return err
+	}
+	_, statErr := os.Stat(path)
+	created := os.IsNotExist(statErr)
+	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
@@ -36,11 +48,15 @@ func cmdInit(args []string) error {
 			return err
 		}
 	}
-	if err := cfg.Save(); err != nil {
-		return err
+	state := "существующая, не изменена"
+	if created {
+		if err := cfg.Save(); err != nil {
+			return err
+		}
+		state = "создана"
 	}
-	fmt.Printf("конфигурация: %s (backend=%s, cpu=%d, mem=%d MiB)\n",
-		filepath.Join(root, "config.json"), cfg.Backend, cfg.CPUs, cfg.MemoryMiB)
+	fmt.Printf("конфигурация %s: %s (backend=%s, cpu=%d, mem=%d MiB)\n",
+		state, path, cfg.Backend, cfg.CPUs, cfg.MemoryMiB)
 
 	be, err := backend.New(cfg.Backend)
 	if err != nil {
