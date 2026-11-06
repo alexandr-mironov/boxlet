@@ -208,6 +208,10 @@ func checkPrivHelper(cfg *config.Config) check {
 	if !need {
 		return check{"privileged helper (порты <1024 не запрошены)", true, ""}
 	}
+	if privhelper.LegacyInstalled() {
+		return check{"privileged helper (порты <1024)", false,
+			"хелпер установлен в старое место (~/.boxlet/bin) и не используется — переустановите: boxlet priv install"}
+	}
 	if !privhelper.Installed() {
 		return check{"privileged helper (порты <1024)", false,
 			"установите: boxlet priv install (один раз, с паролем администратора)"}

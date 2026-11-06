@@ -13,6 +13,11 @@ func Installed() bool {
 	if err != nil {
 		return false
 	}
+	return isSetuidRoot(path)
+}
+
+// isSetuidRoot — файл существует, принадлежит root и имеет setuid-бит.
+func isSetuidRoot(path string) bool {
 	fi, err := os.Stat(path)
 	if err != nil {
 		return false

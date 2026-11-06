@@ -100,8 +100,12 @@ helper-бинарь `boxlet-vm` (Swift, тонкая обёртка над VZ, �
   проброс снимается при остановке контейнера. IP гостя разрешается
   на каждое соединение (может смениться между запусками VM).
   Порты <1024 слушает setuid-хелпер `boxlet-priv` (cmd/boxlet-priv):
-  устанавливается `boxlet priv install` (root:wheel + setuid через
-  osascript с GUI-запросом пароля), биндит порты из `forwarded_ports`
+  устанавливается `boxlet priv install` в
+  `/Library/PrivilegedHelperTools/boxlet-priv` (root:wheel 4755 через
+  osascript с GUI-запросом пароля; копирует root в каталог root,
+  setuid ставится только после сверки sha256 копии — подменить бинарь
+  при установке нельзя, а install.sh, пишущий в ~/.boxlet/bin, его
+  не затирает), биндит порты из `forwarded_ports`
   и сбрасывает привилегии обратно к пользователю; он же создаёт
   симлинк /var/run/docker.sock (операция `link`)
 
