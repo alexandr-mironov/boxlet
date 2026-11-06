@@ -57,6 +57,11 @@ else
     echo "==> добавьте в PATH: export PATH=\"$INSTALL_DIR:\$PATH\""
 fi
 
+# Установленный setuid-хелпер лежит отдельно и сам не обновляется.
+if [ -e /Library/PrivilegedHelperTools/boxlet-priv ]; then
+    echo "==> обновите privileged helper до этой версии: boxlet priv install"
+fi
+
 echo
 echo "Готово: $("$INSTALL_DIR/boxlet" version)"
 echo "Дальше: boxlet init && boxlet start"
