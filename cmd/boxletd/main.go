@@ -53,6 +53,9 @@ type daemon struct {
 	dockerOnce sync.Once
 	dockerCli  *http.Client
 
+	// ts синхронизирует часы гостевой ОС с хостом (см. timesync.go).
+	ts timeSyncer
+
 	// opMu сериализует остановку и рестарт движка: два параллельных
 	// stop/restart (трей шлёт POST, не дожидаясь ответа) не должны
 	// гонять друг с другом внутри Backend.Stop.
@@ -136,6 +139,7 @@ func run() error {
 
 	log.Printf("boxletd: остановка…")
 	srv.Close()
+	d.ts.stop()
 	d.stopPortForwarding()
 	d.px.Stop()
 	return d.be.Stop(context.Background())
@@ -166,6 +170,9 @@ func (d *daemon) startBackend(ctx context.Context) {
 		log.Printf("boxletd: бэкенд не запущен: %v", err)
 		return
 	}
+	// Часы гостя — до того, как сокет Docker отдан наружу: после загрузки
+	// гость отстаёт от хоста до секунды (RTC с точностью до секунды).
+	d.ts.start(agentSession(d.be, d.root))
 	if err := d.px.Start(ctx); err != nil && !strings.Contains(err.Error(), "уже запущен") {
 		d.startMu.Lock()
 		d.startErr = err
@@ -392,6 +399,9 @@ func (d *daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 			out["agent_addr"] = addr
 		}
 	}
+	if ts := d.ts.status(); ts != nil {
+		out["timesync"] = ts
+	}
 	writeJSON(w, out)
 }
 
@@ -426,6 +436,7 @@ func (d *daemon) handleStop(w http.ResponseWriter, r *http.Request) {
 func (d *daemon) stopEngine() error {
 	d.opMu.Lock()
 	defer d.opMu.Unlock()
+	d.ts.stop()
 	d.stopPortForwarding()
 	d.px.Stop()
 	return d.be.Stop(context.Background())

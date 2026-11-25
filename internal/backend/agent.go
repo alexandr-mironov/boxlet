@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/alexandr-mironov/boxlet/internal/timesync"
 )
 
 // DialFunc открывает соединение с Docker API внутри бэкенда
@@ -151,4 +153,23 @@ func RunAgent(dial DialFunc, cmd []string, hostPID, wait bool) error {
 		return fmt.Errorf("код выхода %d", waited.StatusCode)
 	}
 	return nil
+}
+
+// AgentTimeSync синхронизирует часы гостевой ОС с часами хоста через
+// boxlet-agent (протокол см. internal/timesync): гость измеряет смещение
+// относительно хоста и подстраивает свои часы.
+func AgentTimeSync(ctx context.Context, addr, token string) (timesync.Report, error) {
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return timesync.Report{}, fmt.Errorf("агент гостевой ОС недоступен (%s): %w", addr, err)
+	}
+	defer conn.Close()
+	if dl, ok := ctx.Deadline(); ok {
+		conn.SetDeadline(dl)
+	}
+	if _, err := fmt.Fprintf(conn, "%s\n%s\n", token, timesync.Command); err != nil {
+		return timesync.Report{}, err
+	}
+	return timesync.Host(conn, time.Now)
 }
