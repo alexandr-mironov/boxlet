@@ -49,6 +49,10 @@ type daemon struct {
 	dnsCancel context.CancelFunc
 	priv      *privSupervisor // boxlet-priv: порты <1024
 
+	// dockerOnce/dockerCli — общий клиент dockerAPI (см. dockerclient.go).
+	dockerOnce sync.Once
+	dockerCli  *http.Client
+
 	// opMu сериализует остановку и рестарт движка: два параллельных
 	// stop/restart (трей шлёт POST, не дожидаясь ответа) не должны
 	// гонять друг с другом внутри Backend.Stop.
@@ -350,12 +354,7 @@ func (d *daemon) dockerAPI(ctx context.Context, method, path string, body io.Rea
 	if method == http.MethodPost {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	client := &http.Client{Transport: &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return net.Dial("unix", d.layout.DockerSock)
-		},
-	}}
-	resp, err := client.Do(req)
+	resp, err := d.dockerHTTP().Do(req)
 	if err != nil {
 		return nil, err
 	}
