@@ -166,6 +166,7 @@ func cmdStart(args []string) error {
 			State    string `json:"state"`
 			Detail   string `json:"detail"`
 			Running  bool   `json:"running"`
+			Ready    *bool  `json:"ready"` // nil у демона старой сборки
 			StartErr string `json:"start_err"`
 		}
 		json.NewDecoder(resp.Body).Decode(&st)
@@ -175,7 +176,11 @@ func cmdStart(args []string) error {
 			fmt.Printf("  %s\n", st.Detail)
 			lastDetail = st.Detail
 		}
-		if st.Running {
+		// Готовность — открытый сокет Docker, а не просто поднятая VM:
+		// docker-команда сразу после успешного start не должна падать
+		// на ещё не открытом сокете. Демон старой сборки поля ready
+		// не отдаёт — ориентируемся на running, как раньше.
+		if st.Running && (st.Ready == nil || *st.Ready) {
 			fmt.Println("движок запущен; docker API: ~/.boxlet/run/docker.sock")
 			return nil
 		}

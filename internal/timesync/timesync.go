@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 )
 
@@ -195,7 +196,19 @@ func Host(rw io.ReadWriter, now func() time.Time) (Report, error) {
 			}
 			return rep, nil
 		default:
-			// Старый агент ответил текстом ("boxlet-agent: exec: ...").
+			// Агент ответил текстом: старый агент пытался запустить
+			// "@timesync" как процесс ("\nboxlet-agent: exec: ..."),
+			// при неверном токене — "boxlet-agent: неверный токен".
+			// Дочитываем строку, чтобы не советовать обновить boxlet
+			// там, где причина в другом.
+			line, _ := br.ReadBytes('\n')
+			msg := strings.TrimSpace(string(b) + string(line))
+			if i := strings.Index(msg, "boxlet-agent:"); i >= 0 {
+				msg = strings.TrimSpace(msg[i+len("boxlet-agent:"):])
+				if !strings.Contains(msg, "exec") {
+					return Report{}, fmt.Errorf("гостевой агент: %s", msg)
+				}
+			}
 			return Report{}, ErrUnsupported
 		}
 	}

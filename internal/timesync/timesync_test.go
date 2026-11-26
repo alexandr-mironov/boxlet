@@ -178,3 +178,18 @@ func TestHostOldAgent(t *testing.T) {
 		t.Fatalf("Host со старым агентом: %v, want ErrUnsupported", err)
 	}
 }
+
+// Агент с неверным токеном отвечает текстом — Host возвращает само
+// сообщение агента, а не ErrUnsupported (совет «обновите boxlet»
+// ввёл бы в заблуждение).
+func TestHostAgentAuthError(t *testing.T) {
+	g, h := net.Pipe()
+	go func() {
+		io.WriteString(g, "boxlet-agent: неверный токен\n")
+		g.Close()
+	}()
+	_, err := Host(h, time.Now)
+	if err == nil || errors.Is(err, ErrUnsupported) || !strings.Contains(err.Error(), "неверный токен") {
+		t.Fatalf("Host при неверном токене: %v, want текст ошибки агента", err)
+	}
+}

@@ -35,6 +35,7 @@ type timeSyncer struct {
 	tried  time.Time // время последней попытки
 	report timesync.Report
 	err    error
+	fails  int // подряд идущие неудачные попытки (backoff повтора)
 }
 
 // sessionFunc — один сеанс синхронизации (подменяется в тестах).
@@ -62,18 +63,29 @@ func agentSession(be backend.Backend, root string) sessionFunc {
 
 // start выполняет первую синхронизацию синхронно (до того, как наружу
 // отдан сокет Docker) и запускает фоновый цикл. Повторный вызов
-// перезапускает цикл.
-func (t *timeSyncer) start(session sessionFunc) {
+// перезапускает цикл. Возвращаемый контекст отменяется по stop:
+// вызывающий проверяет его перед открытием сокета Docker наружу —
+// иначе stop во время первого сеанса не помешал бы прежнему запуску
+// открыть сокет уже после успешной остановки.
+func (t *timeSyncer) start(session sessionFunc) context.Context {
 	if session == nil {
-		return
+		return nil
 	}
-	t.stop()
-	t.sync(session)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.mu.Lock()
+	if t.cancel != nil {
+		t.cancel() // перезапуск: гасим прежний цикл
+	}
 	t.cancel = cancel
 	t.mu.Unlock()
-	go t.loop(ctx, session, time.NewTicker(timeSyncTick).C, hostClock())
+	t.sync(ctx, session)
+	ticker := time.NewTicker(timeSyncTick)
+	go func() {
+		<-ctx.Done()
+		ticker.Stop() // тикер живёт, пока жив цикл
+	}()
+	go t.loop(ctx, session, ticker.C, hostClock())
+	return ctx
 }
 
 func (t *timeSyncer) stop() {
@@ -116,7 +128,7 @@ func (t *timeSyncer) loop(ctx context.Context, session sessionFunc, tick <-chan 
 			log.Printf("boxletd: часы хоста скакнули (сон/перестановка) — синхронизирую часы гостя")
 		}
 		if t.due(time.Now(), jumped) {
-			t.sync(session)
+			t.sync(ctx, session)
 		}
 	}
 }
@@ -128,23 +140,49 @@ func (t *timeSyncer) loop(ctx context.Context, session sessionFunc, tick <-chan 
 func (t *timeSyncer) due(now time.Time, jumped bool) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	retry := t.err != nil && !errors.Is(t.err, timesync.ErrUnsupported)
-	return jumped || retry || t.tried.IsZero() || now.Sub(t.tried) >= timeSyncInterval
+	switch {
+	case jumped, t.tried.IsZero():
+		return true
+	case t.err == nil, errors.Is(t.err, timesync.ErrUnsupported):
+		return now.Sub(t.tried) >= timeSyncInterval
+	default:
+		// Повтор после ошибки — с backoff: устойчивая ошибка (RTT выше
+		// порога на загруженном qemu/slirp) не должна гнать сеанс
+		// на каждом тике.
+		return now.Sub(t.tried) >= t.retryDelay()
+	}
+}
+
+// retryDelay — пауза перед повтором после fails подряд неудачных сеансов:
+// следующий тик, затем удвоение до timeSyncInterval. Вызывается под t.mu.
+func (t *timeSyncer) retryDelay() time.Duration {
+	d := timeSyncTick
+	for i := 1; i < t.fails && d < timeSyncInterval; i++ {
+		d *= 2
+	}
+	return min(d, timeSyncInterval)
 }
 
 // sync — один сеанс. В лог пишутся перестановки часов и смена
 // состояния ошибки, а не каждый плановый сеанс.
-func (t *timeSyncer) sync(session sessionFunc) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeSyncTimeout)
+func (t *timeSyncer) sync(ctx context.Context, session sessionFunc) {
+	ctx, cancel := context.WithTimeout(ctx, timeSyncTimeout)
 	rep, err := session(ctx)
 	cancel()
 
 	t.mu.Lock()
 	prevErr := t.err
-	t.report, t.err = rep, err
 	t.tried = time.Now()
+	t.err = err
 	if err == nil {
-		t.last = time.Now()
+		// Отчёт — только от успешного сеанса, вместе с last; иначе
+		// /api/status смешивал бы метку успеха с пустым отчётом
+		// неудачной попытки. Ошибка последней попытки хранится
+		// в err отдельно.
+		t.last, t.report = t.tried, rep
+		t.fails = 0
+	} else {
+		t.fails++
 	}
 	t.mu.Unlock()
 

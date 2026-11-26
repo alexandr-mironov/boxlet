@@ -36,6 +36,79 @@ func TestTimeSyncerDue(t *testing.T) {
 	}
 }
 
+// Повтор после ошибки идёт с backoff: следующий тик, затем удвоение
+// до планового интервала — устойчивая ошибка не гоняет сеанс каждые 2 с.
+func TestTimeSyncerRetryBackoff(t *testing.T) {
+	now := time.Now()
+	var ts timeSyncer
+	ts.tried = now
+	ts.err = errors.New("connection refused")
+	for i, want := range []time.Duration{
+		timeSyncTick,     // 1-я ошибка: повтор на следующем тике
+		2 * timeSyncTick, // 2-я: через 4 с
+		4 * timeSyncTick, // 3-я: через 8 с
+		timeSyncInterval, // дальше — не чаще планового интервала
+	} {
+		ts.fails = i + 1
+		if ts.due(now.Add(want-time.Nanosecond), false) {
+			t.Fatalf("fails=%d: повтор раньше %v", ts.fails, want)
+		}
+		if !ts.due(now.Add(want), false) {
+			t.Fatalf("fails=%d: повтор не наступил в %v", ts.fails, want)
+		}
+	}
+}
+
+// После успешного сеанса и следующей ошибки статус показывает замер
+// успешного сеанса и ошибку последней попытки — не пустой отчёт.
+func TestTimeSyncerStatusKeepsLastReport(t *testing.T) {
+	var ts timeSyncer
+	ok := func(context.Context) (timesync.Report, error) {
+		return timesync.Report{Offset: 891 * time.Millisecond, RTT: 200 * time.Microsecond, Action: timesync.ActionStep}, nil
+	}
+	fail := func(context.Context) (timesync.Report, error) {
+		return timesync.Report{}, errors.New("connection refused")
+	}
+	ts.sync(context.Background(), ok)
+	ts.sync(context.Background(), fail)
+	st := ts.status()
+	if st == nil {
+		t.Fatal("статус пуст")
+	}
+	if st["offset_ms"] != 891.0 || st["action"] != timesync.ActionStep {
+		t.Fatalf("статус потерял отчёт успешного сеанса: %v", st)
+	}
+	if st["error"] != "connection refused" {
+		t.Fatalf("ошибка последней попытки не попала в статус: %v", st)
+	}
+}
+
+// stop во время первого сеанса: возвращённый контекст отменён, цикл
+// не делает новых сеансов после остановки.
+func TestTimeSyncerStopDuringFirstSync(t *testing.T) {
+	started := make(chan struct{})
+	var calls atomic.Int32
+	session := func(ctx context.Context) (timesync.Report, error) {
+		calls.Add(1)
+		close(started)
+		<-ctx.Done() // сеанс висит, пока его не отменят
+		return timesync.Report{}, ctx.Err()
+	}
+	var ts timeSyncer
+	ctxch := make(chan context.Context, 1)
+	go func() { ctxch <- ts.start(session) }()
+	<-started
+	ts.stop()
+	ctx := <-ctxch
+	if ctx.Err() == nil {
+		t.Fatal("контекст запуска не отменён после stop")
+	}
+	time.Sleep(100 * time.Millisecond) // даём циклу шанс ошибочно сработать
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("сеансов %d после stop, want 1", got)
+	}
+}
+
 // Цикл: первый тик без скачка часов не синхронизирует (только что был
 // сеанс), тик после «сна» хоста — синхронизирует сразу.
 func TestTimeSyncerLoopWake(t *testing.T) {
@@ -48,7 +121,7 @@ func TestTimeSyncerLoopWake(t *testing.T) {
 	}
 
 	var ts timeSyncer
-	ts.sync(session) // как в start: первый сеанс синхронно
+	ts.sync(context.Background(), session) // как в start: первый сеанс синхронно
 	<-done
 
 	// Часы цикла: монотонные идут ровно по тику, а стенные на третьем
