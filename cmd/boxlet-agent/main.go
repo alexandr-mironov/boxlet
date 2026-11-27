@@ -6,7 +6,9 @@
 //     пустая строка → интерактивный sh;
 //   - дальше сырой двунаправленный поток: stdin команды ← соединение,
 //     stdout+stderr команды → соединение; по завершении команды
-//     соединение закрывается.
+//     соединение закрывается;
+//   - argv[0] = "@timesync" — служебная команда: синхронизация часов
+//     гостевой ОС с хостом (протокол см. internal/timesync).
 //
 // Доступен только с хоста: на darwin-vz сеть vmnet NAT не публикует
 // порт наружу, на qemu hostfwd привязан к 127.0.0.1.
@@ -22,6 +24,9 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
+
+	"github.com/alexandr-mironov/boxlet/internal/timesync"
 )
 
 const addr = ":2376"
@@ -84,6 +89,10 @@ func handle(conn net.Conn) {
 	if len(argv) == 0 {
 		argv = []string{"sh"}
 	}
+	if argv[0] == timesync.Command {
+		syncTime(br, conn)
+		return
+	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	// В br могли остаться байты stdin, пришедшие в одном пакете со строкой argv.
 	cmd.Stdin = io.MultiReader(br, conn)
@@ -91,5 +100,22 @@ func handle(conn net.Conn) {
 	cmd.Stderr = conn
 	if err := cmd.Run(); err != nil {
 		fmt.Fprintf(conn, "\nboxlet-agent: %v\n", err)
+	}
+}
+
+// syncTime — сеанс синхронизации часов гостевой ОС с хостом
+// (инициирует boxletd: при старте VM, периодически и после сна хоста).
+func syncTime(br *bufio.Reader, conn net.Conn) {
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	rw := struct {
+		io.Reader
+		io.Writer
+	}{br, conn}
+	rep, err := timesync.Guest(rw, time.Now, timesync.Apply)
+	switch {
+	case err != nil:
+		log.Printf("синхронизация часов: %v", err)
+	case rep.Error != "" || rep.Action == timesync.ActionStep:
+		log.Printf("синхронизация часов: %s", rep)
 	}
 }

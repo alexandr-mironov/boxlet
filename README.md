@@ -32,6 +32,9 @@ and [NOTICE](NOTICE)).
 - **Full-lifecycle CLI**: `init`, `start`, `stop`, `status`, `logs`,
   `shell`, `set` (VM resources), `service` (launch at login), `upgrade`
 - **Token-authenticated guest agent** for shell access and diagnostics
+- **Guest clock kept in sync with the host** — sub-millisecond, no NTP
+  or internet needed, including right after the host wakes from sleep
+  (see [Guest clock](#guest-clock))
 - Graceful guest shutdown (sync + poweroff); the data disk survives
   restarts and upgrades
 
@@ -70,6 +73,42 @@ seconds-fast boot, Rosetta, and host directory bind mounts.
 
 Inside the VM runs a minimal diskless Alpine Linux with `dockerd`,
 so the API and behavior are identical to "real" Docker.
+
+### Guest clock
+
+The guest has no NTP of its own: its clock is set from a one-second-
+resolution RTC at boot and freezes while the VM is paused during host
+sleep, so it falls behind the host (by ~1 s right after boot, by the
+sleep duration after a wake). Containers then see `now()` earlier than
+timestamps written by processes on the host, which breaks tests like
+`now() BETWEEN created_at AND deleted_at`.
+
+`boxletd` therefore syncs the guest clock to the host through the guest
+agent (`internal/timesync`): right after the VM starts (before the Docker
+socket is exposed), every 15 seconds, and immediately when it notices the
+host woke up or its clock was stepped. The agent takes 8 NTP-style
+request/response samples over vmnet, keeps the one with the lowest RTT
+and corrects the clock: offsets ≥ 50 ms are stepped (`settimeofday`),
+smaller ones are slewed (`adjtimex`, up to 0.5 ms/s, no backward jumps),
+below 0.1 ms is left alone. The last result is shown in `/api/status`
+(`timesync`) and steps are logged in `boxletd.log`.
+
+Check it: the last measured offset (host − guest) and RTT, then the
+kernel clock state in the guest (no `UNSYNC` once synchronized):
+
+```bash
+curl -s http://127.0.0.1:9770/api/status | python3 -m json.tool | grep -A5 timesync
+```
+
+```bash
+boxlet shell adjtimex </dev/null | grep -E "status|tv_sec|tv_usec"
+```
+
+Comparing `tv_sec.tv_usec` against host time by hand is only accurate to
+the `boxlet shell` round trip (~10–20 ms); the guest's busybox `date` has
+no `%N`.
+Requires a guest agent from the same build: after upgrading boxlet,
+restart the VM (`boxlet stop && boxlet start`).
 
 ## Quick start
 
@@ -148,6 +187,7 @@ rm -rf ~/.boxlet /usr/local/bin/boxlet
 - `internal/backend` — driver interface + per-platform implementations
 - `internal/guest` — guest OS: Alpine downloads, apkovl overlay
 - `internal/proxy` — Docker API socket proxying from the VM to the host
+- `internal/timesync` — guest clock sync with the host via the agent
 - `internal/dnsd` — DNS server for the *.boxlet.local zone → guest OS IP
 - `internal/config`, `internal/paths` — instance configuration and paths
 - `internal/webui` — embedded web UI (status, containers, live metrics,

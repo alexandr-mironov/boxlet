@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -48,6 +49,16 @@ type daemon struct {
 	fwdCancel context.CancelFunc
 	dnsCancel context.CancelFunc
 	priv      *privSupervisor // boxlet-priv: порты <1024
+
+	// dockerOnce/dockerCli — общий клиент dockerAPI (см. dockerclient.go).
+	dockerOnce sync.Once
+	dockerCli  *http.Client
+
+	// ready — движок готов: бэкенд поднят и сокет Docker открыт наружу.
+	ready atomic.Bool
+
+	// ts синхронизирует часы гостевой ОС с хостом (см. timesync.go).
+	ts timeSyncer
 
 	// opMu сериализует остановку и рестарт движка: два параллельных
 	// stop/restart (трей шлёт POST, не дожидаясь ответа) не должны
@@ -132,6 +143,7 @@ func run() error {
 
 	log.Printf("boxletd: остановка…")
 	srv.Close()
+	d.ts.stop()
 	d.stopPortForwarding()
 	d.px.Stop()
 	return d.be.Stop(context.Background())
@@ -148,6 +160,7 @@ func (d *daemon) startBackend(ctx context.Context) {
 	d.starting = true
 	d.startErr = nil
 	d.startMu.Unlock()
+	d.ready.Store(false)
 
 	defer func() {
 		d.startMu.Lock()
@@ -162,6 +175,14 @@ func (d *daemon) startBackend(ctx context.Context) {
 		log.Printf("boxletd: бэкенд не запущен: %v", err)
 		return
 	}
+	// Часы гостя — до того, как сокет Docker отдан наружу: после загрузки
+	// гость отстаёт от хоста до секунды (RTC с точностью до секунды).
+	// tsCtx отменяется при stopEngine: если остановка случилась во время
+	// первого сеанса, сокет наружу уже не открываем и цикл не поднимаем.
+	tsCtx := d.ts.start(agentSession(d.be, d.root))
+	if tsCtx != nil && tsCtx.Err() != nil {
+		return
+	}
 	if err := d.px.Start(ctx); err != nil && !strings.Contains(err.Error(), "уже запущен") {
 		d.startMu.Lock()
 		d.startErr = err
@@ -169,6 +190,17 @@ func (d *daemon) startBackend(ctx context.Context) {
 		log.Printf("boxletd: прокси сокета: %v", err)
 		return
 	}
+	if tsCtx != nil && tsCtx.Err() != nil {
+		// Остановка пришла, пока открывали прокси: сокет после stop
+		// не оставляем.
+		d.px.Stop()
+		return
+	}
+	// Готовность — только после открытия сокета: CLI ждёт ready, иначе
+	// docker-команда сразу после успешного `boxlet start` могла упасть
+	// на ещё не открытом сокете (первый сеанс синхронизации ждёт ответа
+	// агента до пяти секунд).
+	d.ready.Store(true)
 	d.postStart(ctx)
 	d.startPortForwarding()
 	d.startDNS()
@@ -350,12 +382,7 @@ func (d *daemon) dockerAPI(ctx context.Context, method, path string, body io.Rea
 	if method == http.MethodPost {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	client := &http.Client{Transport: &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return net.Dial("unix", d.layout.DockerSock)
-		},
-	}}
-	resp, err := client.Do(req)
+	resp, err := d.dockerHTTP().Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -382,6 +409,7 @@ func (d *daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{
 		"backend":   d.cfg.Backend,
 		"running":   st.Running,
+		"ready":     d.ready.Load(),
 		"state":     st.State,
 		"detail":    st.Detail,
 		"version":   st.Version,
@@ -392,6 +420,9 @@ func (d *daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 		if addr, err := sh.AgentAddr(); err == nil {
 			out["agent_addr"] = addr
 		}
+	}
+	if ts := d.ts.status(); ts != nil {
+		out["timesync"] = ts
 	}
 	writeJSON(w, out)
 }
@@ -427,6 +458,8 @@ func (d *daemon) handleStop(w http.ResponseWriter, r *http.Request) {
 func (d *daemon) stopEngine() error {
 	d.opMu.Lock()
 	defer d.opMu.Unlock()
+	d.ready.Store(false)
+	d.ts.stop()
 	d.stopPortForwarding()
 	d.px.Stop()
 	return d.be.Stop(context.Background())
